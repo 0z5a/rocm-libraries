@@ -35,7 +35,7 @@ import functools
 import re
 import shutil
 
-from tensilelite.Tests.rocisa_test_state import preserve_rocisa_kernel_state
+from rocisa_test_state import preserve_rocisa_kernel_state
 from toolchain_test_helpers import cxx_compiler, shared_assembler
 
 # --- assembly canonicalization ---------------------------------------------
