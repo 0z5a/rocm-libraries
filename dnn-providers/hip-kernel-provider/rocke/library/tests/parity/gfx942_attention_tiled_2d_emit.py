@@ -326,12 +326,12 @@ def _rtl(
     return cfg
 
 
-# --- idx18-27: runtime_layout (hipDNN paged/ragged engine). Every catalog
+# --- idx18-36: runtime_layout (hipDNN paged/ragged engine). Every catalog
 #     (head_size, block_size) cell with its catalog num_warps / tile_size
 #     (sub-block tiles at d128/b64 and d256/b32-64), fp16 and bf16, GQA ratios
-#     1-16 (6 leaves VALID_ROWS < BLOCK_M), and one num_kv_heads > 1 spec.
-#     Dense or ragged Q, the window and the Q/O/KV strides are kernel
-#     arguments, so every config emits all of them.
+#     1-16 (5, 6 and 7 leave VALID_ROWS < BLOCK_M), one num_kv_heads > 1 spec,
+#     then the sink variants (idx28-36). Dense or ragged Q, the window and the
+#     Q/O/KV strides are kernel arguments, so every config emits all of them.
 _CONFIGS[18] = _rtl(64, 16, 1, "fp16")
 _CONFIGS[19] = _rtl(64, 32, 4, "bf16")
 _CONFIGS[20] = _rtl(64, 64, 6, "fp16")
@@ -342,6 +342,15 @@ _CONFIGS[24] = _rtl(256, 16, 6, "fp16", num_warps=2)
 _CONFIGS[25] = _rtl(256, 32, 8, "bf16", num_warps=2, tile_size=16)
 _CONFIGS[26] = _rtl(256, 64, 1, "fp16", num_warps=2, tile_size=16)
 _CONFIGS[27] = _rtl(128, 32, 16, "bf16", num_kv_heads=4)
+_CONFIGS[28] = _rtl(64, 16, 2, "bf16", use_sinks=True)
+_CONFIGS[29] = _rtl(64, 32, 5, "fp16", use_sinks=True)
+_CONFIGS[30] = _rtl(64, 64, 7, "bf16", use_sinks=True)
+_CONFIGS[31] = _rtl(128, 16, 16, "fp16", use_sinks=True)
+_CONFIGS[32] = _rtl(128, 32, 2, "bf16", use_sinks=True)
+_CONFIGS[33] = _rtl(128, 64, 5, "fp16", use_sinks=True, tile_size=32)
+_CONFIGS[34] = _rtl(256, 16, 7, "bf16", use_sinks=True, num_warps=2)
+_CONFIGS[35] = _rtl(256, 32, 16, "fp16", use_sinks=True, num_warps=2, tile_size=16)
+_CONFIGS[36] = _rtl(256, 64, 2, "bf16", use_sinks=True, num_warps=2, tile_size=16)
 
 
 def _kernel(idx: int):
