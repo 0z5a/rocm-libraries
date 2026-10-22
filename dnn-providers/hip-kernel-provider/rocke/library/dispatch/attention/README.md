@@ -489,7 +489,9 @@ their prefix sums or paged metadata. Rows load as 16-byte vectors (8-byte for
 FP8 K/V), so data pointers and every outer stride must keep that alignment.
 Paged launches pass the caches' page count as `num_blocks`; the kernels treat a
 `block_table` entry outside `[0, num_blocks)` as a page of zeros (no read
-outside the caches, no host-side value check).
+outside the caches, no host-side value check). The prefill kernel takes a K
+table (`block_table`) and a V table (`block_table_v`) that share one row
+stride; the binding passes its one `block_table` as both.
 Runtime kwargs are `softmax_scale`, positive `softcap` when selected, and
 explicit FP32 `k_scale`/`v_scale` for FP8 storage. The decode binding takes
 its split count from the shape, the visible key range and the CU count

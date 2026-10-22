@@ -40,7 +40,7 @@ from kernels.gfx1151.wmma_fmha_fwd_v2 import (
     WmmaFmhaFwdV2Spec,
     is_valid_spec as prefill_is_valid,
 )
-from rocke.dispatch.core import PinRefused, pin_to_spec
+from rocke.dispatch.core import PinRefused, pin_to_spec, stable_json_hash
 
 PREFILL = "attention_rdna_wmma_prefill"
 DECODE = "attention_rdna_wmma_decode"
@@ -886,6 +886,42 @@ class TestRdnaWmmaTunedCandidates(unittest.TestCase):
                 }
                 self.assertEqual(fields, swept | fixed)
                 self.assertFalse(swept & fixed)
+
+    def test_off_query_layout_options_keep_the_stored_spec_hash(self):
+        # ``dense_q`` / ``seqused_q`` (hipDNN's paged engine) stay out of the
+        # cache key while off, so a pin stored before they existed still
+        # resolves to the same spec_hash.
+        request = _pinned(_request(seqlen_q=1024, seqlen_k=1024), "prefill")
+        tuned = dispatch_attention(request)
+        self.assertEqual(tuned.kernel_id.spec_hash, "20a3e73979e722b5")
+        names = {name for name, _value in tuned.spec.cache_key()[4]}
+        self.assertFalse(names & {"dense_q", "seqused_q"})
+
+    def test_on_query_layout_options_change_the_cache_key(self):
+        # Turning either option on must reach the cache key and spec_hash, or
+        # a dense-Q / seqused_q object would share a packed object's cache entry.
+        tuned = dispatch_attention(
+            _pinned(_request(seqlen_q=1024, seqlen_k=1024), "prefill")
+        ).spec
+        paged = dataclasses.replace(
+            tuned,
+            kernel_spec=dataclasses.replace(
+                tuned.kernel_spec, layout="paged", page_block_size=16
+            ),
+        )
+        off_key = paged.cache_key()
+        off_hash = stable_json_hash(paged.identity(), n=16)
+        for option in ("dense_q", "seqused_q"):
+            with self.subTest(option=option):
+                on = dataclasses.replace(
+                    paged,
+                    kernel_spec=dataclasses.replace(
+                        paged.kernel_spec, **{option: True}
+                    ),
+                )
+                self.assertIn((option, "True"), on.cache_key()[4])
+                self.assertNotEqual(on.cache_key(), off_key)
+                self.assertNotEqual(stable_json_hash(on.identity(), n=16), off_hash)
 
 
 if __name__ == "__main__":
