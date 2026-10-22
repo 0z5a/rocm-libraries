@@ -27,6 +27,7 @@ target_sources(hip_kernel_provider_tests PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/packs/TestGfx950AttentionUnified3DDispatch.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/packs/TestUnifiedAttentionGeometry.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/packs/TestGfx1151WmmaAttentionMatchers.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/packs/TestAttentionPagedUnifiedMatchers.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/packs/TestIngestorDispatchAliases.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/packs/TestPackLaunchValues.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/serialization/TestIngestorPlanHeader.cpp
@@ -64,6 +65,7 @@ target_sources(hip_kernel_provider_census_tests PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/packs/TestGfx950AttentionUnified3DCatalogTiles.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/packs/TestGfx1151WmmaAttentionPacks.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/packs/TestGfx1151WmmaAttentionDecodePacks.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/packs/TestAttentionPagedUnifiedPacks.cpp
 )
 
 # FlyDSL's suites ride FlyDSL's gate, not the ingestor's: they read a shard only FlyDSL

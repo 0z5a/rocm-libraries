@@ -56,6 +56,9 @@ const std::vector<IngestorPack>& ingestorPacks()
         {"hipkernel:Gfx1151WmmaAttentionDecode",
          &registerGfx1151WmmaAttentionDecodeSymbols,
          &resetGfx1151WmmaAttentionDecodeModuleCache},
+        {ATTENTION_PAGED_UNIFIED_ENGINE_NAME,
+         &registerAttentionPagedUnifiedSymbols,
+         &resetAttentionPagedUnifiedModuleCache},
     };
     return s_packs;
 }
