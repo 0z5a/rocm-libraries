@@ -397,9 +397,14 @@ rocke_status_t
         v_head = rocke_b_div(b, head, g);
     }
 
-    /* ---- packed layouts: this sequence's rows and lengths ---- */
+    /* ---- packed layouts: this sequence's rows and lengths ----
+     * `span` is the rows the sequence owns in Q / O / LSE, `sq` its live
+     * rows; they differ only with seqused_q, whose rows past `sq` are
+     * padding. */
     rocke_value_t* q_row0 = NULL;
     rocke_value_t* k_row0 = NULL;
+    rocke_value_t* live_rows = NULL;
+    rocke_value_t* span = sq;
     if(!v2_layout_is(spec, "dense"))
     {
         rocke_value_t* nxt = spec->dense_q ? NULL : rocke_b_add(b, batch, c1);
@@ -409,15 +414,16 @@ rocke_status_t
             rocke_value_t* q_end = rocke_b_global_load_i32(b, param("cu_seqlens_q"), nxt, 4);
             sq = rocke_b_sub(b, q_end, q_row0);
         }
+        span = sq;
         if(spec->seqused_q)
         {
             rocke_value_t* used = rocke_b_global_load_i32(b, param("seqused_q"), batch, 4);
-            sq = rocke_b_smin(b, used, sq);
+            sq = live_rows = rocke_b_smin(b, used, span);
         }
-        rocke_value_t* past = rocke_b_cmp_ge(b, q_start, sq);
+        rocke_value_t* past = rocke_b_cmp_ge(b, q_start, span);
         rocke_if_t guard = rocke_b_scf_if(b, past);
         rocke_b_region_enter(b, guard.then_region);
-        rocke_b_ret(b); /* past this sequence's queries */
+        rocke_b_ret(b); /* past this sequence's rows */
         rocke_b_region_leave(b);
         if(v2_layout_is(spec, "ragged"))
         {
@@ -512,10 +518,10 @@ rocke_status_t
         p.k_rsrc = slice_rsrc("K", "k", kv_head, sk, hdq, kv_eb, NULL, k_row0, &p.k_bytes);
         p.v_rsrc = slice_rsrc("V", "v", v_head, sk, hdv, kv_eb, NULL, k_row0, &p.v_bytes);
     }
-    p.o_rsrc = slice_rsrc("O", "o", head, sq, hdv, 2, NULL, q_row0, NULL);
+    p.o_rsrc = slice_rsrc("O", "o", head, span, hdv, 2, NULL, q_row0, NULL);
     {
         rocke_value_t* enabled = rocke_b_cmp_ne(b, param("write_lse"), c0);
-        p.lse_rsrc = slice_rsrc("LSE", "lse", head, sq, c1, 4, enabled, q_row0, NULL);
+        p.lse_rsrc = slice_rsrc("LSE", "lse", head, span, c1, 4, enabled, q_row0, NULL);
     }
     if(spec->bias != NULL)
     {
@@ -639,6 +645,7 @@ rocke_status_t
     p.seqlen_k = sk;
     p.q_start = q_start;
     p.scale_log2 = param("scale_log2");
+    p.live_rows = live_rows;
     if(rocke_rdna_attention_fwd_body(b, &cfg, &p) != ROCKE_OK)
         return rocke_ir_builder_status(b);
     rocke_b_ret(b);

@@ -267,6 +267,7 @@ def rdna_attention_fwd_body(
     num_blocks: Optional[Value] = None,
     k_ptr: Optional[Value] = None,
     v_ptr: Optional[Value] = None,
+    live_rows: Optional[Value] = None,
 ) -> None:
     """Emit the K loop and epilogue of one CTA.
 
@@ -309,6 +310,10 @@ def rdna_attention_fwd_body(
     addressed loads per row. The tables' values are caller data: a page id
     outside ``[0, num_blocks)`` (the caches' page count) is not addressed --
     its keys read as zero K (or V) rows, like rows past the sequence.
+    ``live_rows`` (optional) marks query rows
+    ``>= live_rows`` as padding: they store O = 0 and LSE = -inf (no sink
+    either), and a tile of them skips the K loop; the O / LSE resources must
+    span them.
     """
     cfg.validate()
     bf16 = cfg.dtype == "bf16"
@@ -810,6 +815,9 @@ def rdna_attention_fwd_body(
         return b.div(b.add(x, ci(d - 1)), ci(d))
 
     zero_rows = b.cmp_le(seqlen_k, c0)
+    if live_rows is not None:
+        # A tile of padding rows only reaches the epilogue's zero store.
+        zero_rows = b.lor(zero_rows, b.cmp_ge(q_start, live_rows))
     sk = b.smax(seqlen_k, c0)
     n_tiles = cdiv(sk, BN)
     if not causal:
@@ -1050,6 +1058,8 @@ def rdna_attention_fwd_body(
     accs = state[2:]
     l_tot = b.fadd(l_f, permx16_f32(l_f))
     empty = b.fcmp("oeq", l_tot, zero_f)
+    if live_rows is not None:
+        empty = b.lor(empty, b.cmp_ge(q_row, live_rows))
     inv_l = b.select(empty, zero_f, b.rcp(l_tot))
     o_row_off = b.add(b.mul(q_row, stride_o), dv_base)
     d_lane = b.mul(half, ci(8))

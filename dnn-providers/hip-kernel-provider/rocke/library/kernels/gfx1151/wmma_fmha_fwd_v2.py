@@ -52,8 +52,9 @@ keeps Q / O / LSE batch-strided like the dense layout -- uniform decode reads a
 [B, Sq, Hq, D] query against a paged cache -- so there is no ``cu_seqlens_q``
 and every sequence spans ``seqlen_q`` rows. ``seqused_q`` (any packed layout)
 takes each sequence's live query count from ``seqused_q`` [batch] I32, at most
-its span (``cu_seqlens_q`` gap or ``seqlen_q``); rows past it are neither read
-nor written, and the causal diagonal aligns to it.
+its span (``cu_seqlens_q`` gap or ``seqlen_q``); the causal diagonal aligns to
+it. Rows past it, up to the span, are padding: they are not read and write
+O = 0 and LSE = -inf (cuDNN's padded query rows), with or without sinks.
 
 Grid: flat 1-D, ``batch * ceil(Sq / block_m) * Hq`` CTAs of
 ``WmmaFmhaFwdV2Spec.threads`` threads (:func:`wmma_fmha_fwd_v2_grid`). Heads
@@ -492,16 +493,20 @@ def build_wmma_fmha_fwd_v2(spec: WmmaFmhaFwdV2Spec, *, arch: str) -> KernelDef:
     v_head = b.div(head, b.div(hq, p["num_v_heads"]))
 
     # ---- packed layouts: this sequence's rows and lengths ----
-    q_row0 = k_row0 = None
+    # ``span`` is the rows the sequence owns in Q / O / LSE, ``sq`` its live
+    # rows; they differ only with seqused_q, whose rows past ``sq`` are padding.
+    q_row0 = k_row0 = live_rows = None
+    span = sq
     if spec.layout != "dense":
         nxt = None if spec.dense_q else b.add(batch, c1)
         if not spec.dense_q:
             q_row0 = b.global_load_i32(p["cu_seqlens_q"], batch)
             sq = b.sub(b.global_load_i32(p["cu_seqlens_q"], nxt), q_row0)
+        span = sq
         if spec.seqused_q:
-            sq = b.smin(b.global_load_i32(p["seqused_q"], batch), sq)
-        with b.scf_if(b.cmp_ge(q_start, sq)):
-            b.ret()  # past this sequence's queries
+            sq = live_rows = b.smin(b.global_load_i32(p["seqused_q"], batch), span)
+        with b.scf_if(b.cmp_ge(q_start, span)):
+            b.ret()  # past this sequence's rows
         if spec.layout == "ragged":
             k_row0 = b.global_load_i32(p["cu_seqlens_k"], batch)
             sk = b.sub(b.global_load_i32(p["cu_seqlens_k"], nxt), k_row0)
@@ -552,12 +557,12 @@ def build_wmma_fmha_fwd_v2(spec: WmmaFmhaFwdV2Spec, *, arch: str) -> KernelDef:
     else:
         k_rsrc, k_bytes = slice_rsrc(p["K"], "k", kv_head, sk, hdq, kv_eb, row0=k_row0)
         v_rsrc, v_bytes = slice_rsrc(p["V"], "v", v_head, sk, hdv, kv_eb, row0=k_row0)
-    o_rsrc, _ = slice_rsrc(p["O"], "o", head, sq, hdv, 2, row0=q_row0)
+    o_rsrc, _ = slice_rsrc(p["O"], "o", head, span, hdv, 2, row0=q_row0)
     lse_rsrc, _ = slice_rsrc(
         p["LSE"],
         "lse",
         head,
-        sq,
+        span,
         c1,
         4,
         enabled=b.cmp_ne(p["write_lse"], c0),
@@ -655,6 +660,7 @@ def build_wmma_fmha_fwd_v2(spec: WmmaFmhaFwdV2Spec, *, arch: str) -> KernelDef:
         num_blocks=p.get("num_blocks"),
         k_ptr=k_ptr,
         v_ptr=v_ptr,
+        live_rows=live_rows,
     )
     b.ret()
     return b.kernel

@@ -9,8 +9,8 @@ E4M3FN K/V with runtime scales, ragged (varlen) and paged K/V (per-tile and
 per-row block-table lookups, shuffled pages, NaN-poisoned unused slots, one
 table for both caches or separate K and V tables), a
 batch-strided (dense) Q against a paged cache, per-sequence live query counts
-(``seqused_q``: rows past them, and gaps between packed sequences, stay
-untouched), each alone and in model combinations (gpt-oss sinks + sliding
+(``seqused_q``: rows past them, up to each sequence's span, are padding and
+give O = 0, LSE = -inf), each alone and in model combinations (gpt-oss sinks + sliding
 window at D64 GQA, Gemma-2 softcap + sliding window at D256, everything at
 once).
 
@@ -475,7 +475,7 @@ def test_prefill_feature_matches_reference(case, dtype):
                 "lse": (Hq * max_q, 1, max_q),
             }
         else:
-            # Live query rows, then each sequence's untouched gap rows.
+            # Live query rows, then each sequence's padding rows.
             q_seqs = [
                 (
                     np.concatenate([q, rnd(s - len(q), Hq, dq).astype(npdt)])
@@ -618,7 +618,7 @@ def test_prefill_feature_matches_reference(case, dtype):
             module.unload()
         dev.free()
 
-    gap_rows = []
+    gap_rows = gap_lses = []
     if layout == "dense":
         outs = [out[bi] for bi in range(B)]
         lses = [got_lse[bi] for bi in range(B)]
@@ -626,13 +626,20 @@ def test_prefill_feature_matches_reference(case, dtype):
         outs = [out[bi, : lens_q[bi]] for bi in range(B)]
         lses = [got_lse[bi, :, : lens_q[bi]] for bi in range(B)]
         gap_rows = [out[bi, lens_q[bi] :] for bi in range(B)]
+        gap_lses = [got_lse[bi, :, lens_q[bi] :] for bi in range(B)]
     else:
         off = np.concatenate([[0], np.cumsum(spans)])
         outs = [out[off[bi] : off[bi] + lens_q[bi]] for bi in range(B)]
         lses = [got_lse[:, off[bi] : off[bi] + lens_q[bi]] for bi in range(B)]
         gap_rows = [out[off[bi] + lens_q[bi] : off[bi + 1]] for bi in range(B)]
-    for bi, rows in enumerate(gap_rows):
-        assert np.isnan(rows).all(), f"sequence {bi}: a row past seqused_q was written"
+        gap_lses = [got_lse[:, off[bi] + lens_q[bi] : off[bi + 1]] for bi in range(B)]
+    for bi, (rows, row_lse) in enumerate(zip(gap_rows, gap_lses)):
+        assert (
+            rows == 0
+        ).all(), f"sequence {bi}: a padding row past seqused_q is not O = 0"
+        assert np.isneginf(
+            row_lse
+        ).all(), f"sequence {bi}: a padding row's LSE is not -inf"
     tol = 4e-2 if dtype == "bf16" else 2e-2
     for bi in range(B):
         o, ref = outs[bi], refs[bi]
