@@ -94,7 +94,8 @@ extern "C" {
  *    rocke_mma_catalog_enumerate / _has_shape / _select_largest_k /
  *    _op_for_shape signatures gained a trailing dst_dtype parameter.
  * 8: rocke_param_opts_t gained nocapture, nonnull and dereferenceable (each
- *    with a *_set flag) at its end, which changes its size. */
+ *    with a *_set flag) and the integer facts (rocke_int_facts_t) at its end,
+ *    which changes its size. */
 #define ROCKE_ABI_VERSION 8
 
 /* Wire ABI: the CBOR recipe/bundle/guard vocabulary this engine understands.
@@ -102,7 +103,10 @@ extern "C" {
  * 3: the scf_if_else instruction (converging runtime if/else, scf.if_else);
  *    older engines reject it as an unknown instruction op.
  * 4: the workgroup_size kernel attr (the exact launch block size); an older
- *    lowerer ignores it and sizes the kernel for max_workgroup_size instead. */
+ *    lowerer ignores it and sizes the kernel for max_workgroup_size instead.
+ *    And the integer facts on a param instruction (ge, gt, le, lt, eq,
+ *    multiple_of); an older reader drops a param attr it does not know, so it
+ *    would replay the kernel and plan a launch that checks none of them. */
 #define ROCKE_RECIPE_ABI 4
 
 /* The values the LOADED library was compiled with. A caller compares these
