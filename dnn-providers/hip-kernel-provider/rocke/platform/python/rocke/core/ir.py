@@ -5526,19 +5526,20 @@ class IRBuilder:
 
     def trap(self) -> None:
         """Abort the kernel: ``call void @llvm.trap()`` (HIP
-        ``__builtin_trap()``). The AMDGPU backend emits ``s_trap 2``; on gfx11
-        it emits its simulated trap instead: ``s_trap 2``, then ``s_sendmsg``,
-        then an ``s_sethalt`` loop.
+        ``__builtin_trap()``). The AMDGPU backend emits ``s_trap 2``; on
+        gfx1100-gfx1103 (and gfx11-generic) it emits its simulated trap
+        instead: ``s_trap 2``, then ``s_sendmsg``, then an ``s_sethalt`` loop.
+        gfx1150-gfx1153 get the plain ``s_trap 2``.
 
         What a taken trap does depends on the host. On Linux (ROCr) the queue
-        reports an error and the runtime aborts the process. On Windows the
-        HIP runtime never turns the trap into an error: the launch never
-        returns. Under a debugger the wave stops at the trap. None of these
-        lets the process carry on, so a trap is the last resort, for a
-        condition the host checks before the launch and that must still never
-        reach a memory access on the device. Put it under a branch on that
-        condition (``scf_if``). A check the process must survive belongs on
-        the host, before the launch, not in a trap.
+        reports an error and the runtime aborts the process. On Windows, on
+        gfx110X GPUs, the HIP runtime has been seen not to turn the trap into
+        an error: the launch never returned. Under a debugger the wave stops
+        at the trap. None of these lets the process carry on, so a trap is
+        the last resort, for a condition the host checks before the launch
+        and that must still never reach a memory access on the device. Put it
+        under a branch on that condition (``scf_if``). A check the process
+        must survive belongs on the host, before the launch, not in a trap.
         """
         self._op("tile.trap")
 

@@ -4,11 +4,14 @@
 """The ``trap`` op: abort the kernel.
 
 ``trap()`` lowers to ``call void @llvm.trap()`` (HIP ``__builtin_trap()``),
-which the AMDGPU backend emits as ``s_trap 2`` (on gfx11, its simulated trap).
-A taken trap aborts the process on Linux (ROCr) and never returns from the
-launch on Windows. That is the runtime's behaviour, not rocKE's, so no test
-takes the trap on a GPU: ``s_trap 2`` in the code object is the check that the
-trap is emitted.
+which the AMDGPU backend emits as ``s_trap 2`` (on gfx1100-gfx1103 and
+gfx11-generic, its simulated trap: ``s_trap 2``, ``s_sendmsg``, then an
+``s_sethalt`` loop; gfx1150-gfx1153 get the plain ``s_trap 2``). A taken trap
+aborts the process on Linux (ROCr), and on Windows (gfx110X) the launch has
+been seen to never return. That is the runtime's behaviour, not rocKE's, so no
+test takes the trap on a GPU: ``s_trap 2`` in the code object is the check that
+the trap is emitted, and the simulated trap's ``s_sethalt`` is checked on the
+targets that get it and not on those that do not.
 
 Covers the LLVM IR and HIP source of both engines (the same text at every LLVM
 flavor), the refusal of a trap with operands or results by the verifier and
@@ -145,7 +148,26 @@ def _objdump():
     return None
 
 
-def test_code_object_holds_s_trap_2_on_gfx90a():
+# (target, whether the backend emits its simulated trap). The simulated trap
+# follows ``s_trap 2`` with ``s_sendmsg`` and an ``s_sethalt`` loop; the
+# backend uses it where the hardware treats ``s_trap 2`` as a no-op, which is
+# gfx1100-gfx1103 and gfx11-generic but not gfx1150-gfx1153.
+TRAP_TARGETS = (
+    ("gfx90a", False),
+    ("gfx1100", True),
+    ("gfx1103", True),
+    ("gfx11-generic", True),
+    ("gfx1150", False),
+    ("gfx1151", False),
+)
+
+
+@pytest.mark.parametrize(
+    ("arch", "simulated"), TRAP_TARGETS, ids=[arch for arch, _ in TRAP_TARGETS]
+)
+def test_code_object_holds_s_trap_2_and_halts_only_where_the_trap_is_simulated(
+    arch, simulated
+):
     from rocke.helpers.compile import compile_kernel
     from rocke.runtime import comgr
 
@@ -156,18 +178,21 @@ def test_code_object_holds_s_trap_2_on_gfx90a():
         comgr._resolve_lib()
     except comgr.ComgrError as error:
         pytest.skip(f"COMGR not loadable: {str(error)[:200]}")
-    hsaco = compile_kernel(_trap_kernel("trap_isa"), arch="gfx90a").hsaco
+    hsaco = compile_kernel(_trap_kernel("trap_isa"), arch=arch).hsaco
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "trap.hsaco"
         path.write_bytes(hsaco)
         isa = subprocess.run(
-            [objdump, "-d", "--mcpu=gfx90a", str(path)],
+            [objdump, "-d", f"--mcpu={arch}", str(path)],
             check=True,
             capture_output=True,
             text=True,
         ).stdout
-    traps = [ln.split("//")[0].split() for ln in isa.splitlines() if "s_trap" in ln]
+    instructions = [ln.split("//")[0].split() for ln in isa.splitlines()]
+    traps = [words for words in instructions if words[:1] == ["s_trap"]]
     assert traps == [["s_trap", "2"]], traps
+    halts = [words for words in instructions if words[:1] == ["s_sethalt"]]
+    assert bool(halts) == simulated, halts
 
 
 # --------------------------------------------------------------------------

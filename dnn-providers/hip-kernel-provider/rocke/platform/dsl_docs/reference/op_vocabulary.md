@@ -193,14 +193,16 @@ All MFMAs take three literal immarg constants (`cbsz=0, abid=0, blgp=0`) at the 
 | `scf.if_else` | `scf_if_else(cond, result_types=())` (ctx manager) | conditional branch + then and else blocks + join block; one phi per result |
 | `scf.yield`  | `scf_yield(*values)`   | records yielded values; consumed by enclosing for/if_else |
 | `cf.return`  | (auto-emitted)         | `ret void`                                            |
-| `tile.trap`  | `trap()`               | `call void @llvm.trap()` (`s_trap 2`; gfx11: simulated trap); HIP `__builtin_trap()` |
+| `tile.trap`  | `trap()`               | `call void @llvm.trap()` (`s_trap 2`; gfx1100-gfx1103, gfx11-generic: simulated trap); HIP `__builtin_trap()` |
 
-`trap()` ends the wave at a trap instruction. The AMDGPU backend emits `s_trap 2`; on gfx11 it emits
-its simulated trap instead (`s_trap 2`, then `s_sendmsg`, then an `s_sethalt` loop). What the host
-sees depends on the platform:
+`trap()` ends the wave at a trap instruction. The AMDGPU backend emits `s_trap 2`; on gfx1100-gfx1103
+(and gfx11-generic) it emits its simulated trap instead (`s_trap 2`, then `s_sendmsg`, then an
+`s_sethalt` loop). gfx1150-gfx1153 get the plain `s_trap 2`. What the host sees depends on the
+platform:
 
 - Linux (ROCr): the queue reports an error and the runtime aborts the process.
-- Windows: the HIP runtime never turns the trap into an error; the launch never returns.
+- Windows: on gfx110X GPUs the HIP runtime has been seen not to turn the trap into an error; the
+  launch never returned.
 - Under a debugger: the wave stops at the trap.
 
 None of these lets the process carry on, so a trap is a last resort: put it under an `scf_if` on a
