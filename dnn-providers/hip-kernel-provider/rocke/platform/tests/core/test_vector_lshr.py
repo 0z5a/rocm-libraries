@@ -5,10 +5,12 @@
 
 LLVM's ``lshr <N x iW>`` shifts zeros in at bit ``W - 1``. The HIP lowering
 reads each lane through the unsigned type of its width before shifting, so a
-negative i8 or i16 lane does not shift its sign bits in. Covers the HIP source
-of both engines, that hipcc accepts it, and, when a GPU is present, that the
-LLVM route and hipcc on the HIP source both engines emit compute the same
-lanes as numpy, on negative and positive lanes alike.
+negative i8 or i16 lane does not shift its sign bits in. Covers the HIP source,
+that hipcc accepts it, and, when a GPU is present, that the LLVM route and
+hipcc on the HIP source compute the same lanes as numpy, on negative and
+positive lanes alike. The HIP source is the Python engine's, and must equal
+the C++ engine's when the ``rocke_engine`` binding is built, so the HIP cases
+run on lanes that do not build it.
 """
 
 from __future__ import annotations
@@ -25,7 +27,7 @@ from rocke.core.arch.target import (
     compiler_target_from_target_id,
 )
 from rocke.core.ir import I8, I16, I32, IRBuilder, PtrType
-from rocke.tests.engines import lower_hip_with_both_engines
+from rocke.tests.engines import lower_hip_with_available_engines
 
 _LANES = 64
 
@@ -69,19 +71,19 @@ def _numpy(dtype):
 @pytest.mark.parametrize("case", CASES, ids=_id)
 def test_hip_reads_each_lane_through_its_unsigned_type(case):
     dtype, n, unsigned, _ = case
-    hip = lower_hip_with_both_engines(_lshr_kernel(dtype, n), "gfx942")
+    hip = lower_hip_with_available_engines(_lshr_kernel(dtype, n), "gfx942")
     shifts = [line.strip() for line in hip.splitlines() if " >> " in line]
     assert len(shifts) == n
     assert all(f"= (({unsigned})" in line for line in shifts), shifts
 
 
 def _hipcc(kernel, target_id, out_dir):
-    """Compile the HIP source both engines emit for ``kernel`` with hipcc;
-    return the code object."""
+    """Compile the HIP source emitted for ``kernel`` with hipcc; return the
+    code object."""
     hipcc = shutil.which("hipcc")
     if hipcc is None:
         pytest.skip("hipcc not found")
-    hip = lower_hip_with_both_engines(kernel, base_arch_from_target_id(target_id))
+    hip = lower_hip_with_available_engines(kernel, base_arch_from_target_id(target_id))
     source = out_dir / f"{kernel.name}.hip"
     blob = out_dir / f"{kernel.name}.hsaco"
     source.write_text(hip)

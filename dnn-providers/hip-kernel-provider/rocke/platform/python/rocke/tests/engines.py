@@ -24,6 +24,9 @@ use: the installed wheel has no ``rocke_engine`` binding, so such a test runs th
 Python engine alone there and both engines wherever the binding is supplied.
 ``all_engines_backend`` is the ``backend`` argument that runs those same engines
 through ``compile_kernel`` and similar entry points.
+``lower_hip_with_available_engines`` is the HIP-source check for such a test:
+it lowers with the Python engine and, when the binding is importable, also with
+the C++ engine, requiring the same text.
 """
 
 from __future__ import annotations
@@ -43,6 +46,7 @@ __all__ = [
     "assert_both_engines_reject",
     "assert_both_engines_reject_hip",
     "available_engines",
+    "lower_hip_with_available_engines",
     "lower_hip_with_both_engines",
     "lower_with_both_engines",
 ]
@@ -97,16 +101,29 @@ def assert_both_engines_reject(
     assert str(native_error.value).endswith(": " + message), str(native_error.value)
 
 
+def lower_hip_with_available_engines(kernel: KernelDef, arch: str) -> str:
+    """Lower ``kernel`` to HIP source for ``arch`` with every available engine;
+    return the shared text.
+
+    The Python engine always lowers; the C++ engine lowers too when its binding
+    is importable, and must emit the same text.
+    """
+    python_hip = lower_kernel_to_hip(kernel, arch=arch)
+    if "cpp" in available_engines():
+        import rocke_engine
+
+        native_hip = rocke_engine.lower_serialized_ir_hip(serialize(kernel), arch)
+        assert native_hip == python_hip, (
+            f"the C++ engine lowered kernel '{kernel.name}' to HIP for {arch} "
+            "differently from the Python engine"
+        )
+    return python_hip
+
+
 def lower_hip_with_both_engines(kernel: KernelDef, arch: str) -> str:
     """Lower ``kernel`` to HIP source for ``arch`` with each engine; return the shared text."""
-    engine = pytest.importorskip("rocke_engine")
-    python_hip = lower_kernel_to_hip(kernel, arch=arch)
-    native_hip = engine.lower_serialized_ir_hip(serialize(kernel), arch)
-    assert native_hip == python_hip, (
-        f"the C++ engine lowered kernel '{kernel.name}' to HIP for {arch} "
-        "differently from the Python engine"
-    )
-    return python_hip
+    pytest.importorskip("rocke_engine")
+    return lower_hip_with_available_engines(kernel, arch)
 
 
 def assert_both_engines_reject_hip(
