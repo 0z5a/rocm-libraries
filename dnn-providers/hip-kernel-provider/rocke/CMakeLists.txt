@@ -137,4 +137,125 @@ if(ROCKE_BUILD_PYENV)
         COMMENT "rocke-wheels: building platform + library Python wheels")
 endif()
 
+# ---------------------------------------------------------------------------
+# Optional embedding assets for installed library tests.
+#
+# platform/ remains standalone and knows only that its SDPA pytest entry may
+# receive extra arguments. This umbrella owns integration with files outside
+# rocKE because it already joins the platform and library test trees.
+# ---------------------------------------------------------------------------
+include(GNUInstallDirs)
+
+set(_rocke_require_external_assets_default OFF)
+if(ROCKE_INSTALL_PROVIDER_CTEST_SUBDIR AND DEFINED THEROCK_SUBPROJECT_TARGET)
+    set(_rocke_require_external_assets_default ON)
+endif()
+option(ROCKE_REQUIRE_EXTERNAL_TEST_ASSETS
+       "Fail configuration unless embedded rocKE test assets are available"
+       ${_rocke_require_external_assets_default})
+
+if(NOT DEFINED ROCKE_HIPDNN_SDPA_TEMPLATE)
+    set(ROCKE_HIPDNN_SDPA_TEMPLATE "" CACHE FILEPATH
+        "hipDNN SDPA graph template staged with installed rocKE tests")
+endif()
+if(NOT DEFINED ROCKE_HIPDNN_SDPA_BUNDLES)
+    set(ROCKE_HIPDNN_SDPA_BUNDLES "" CACHE PATH
+        "hipDNN golden-bundle directory staged with installed rocKE tests")
+endif()
+if(NOT DEFINED ROCKE_PROVIDER_PACK_HEADERS)
+    set(ROCKE_PROVIDER_PACK_HEADERS "" CACHE PATH
+        "Provider pack-header directory staged with installed rocKE tests")
+endif()
+
+set(_rocke_sdpa_template "${ROCKE_HIPDNN_SDPA_TEMPLATE}")
+set(_rocke_sdpa_bundles "${ROCKE_HIPDNN_SDPA_BUNDLES}")
+set(_rocke_pack_headers "${ROCKE_PROVIDER_PACK_HEADERS}")
+if(DEFINED ROCM_LIBRARIES_ROOT)
+    if(NOT _rocke_sdpa_template)
+        set(_rocke_sdpa_template
+            "${ROCM_LIBRARIES_ROOT}/projects/hipdnn/tools/IngestorGenerator/configs/templates/attention_sdpa_fwd.graph.json")
+    endif()
+    if(NOT _rocke_sdpa_bundles)
+        set(_rocke_sdpa_bundles
+            "${ROCM_LIBRARIES_ROOT}/dnn-providers/integration-tests/integration-test-bundles")
+    endif()
+    if(NOT _rocke_pack_headers)
+        set(_rocke_pack_headers
+            "${ROCM_LIBRARIES_ROOT}/dnn-providers/hip-kernel-provider/src/engines/kernel_ingestor_engine/packs")
+    endif()
+endif()
+
+set(_rocke_install_external_assets ON)
+if((DEFINED ROCKE_INSTALL_TESTS AND NOT ROCKE_INSTALL_TESTS)
+   OR (DEFINED ROCKE_INSTALL_PYTHON_TESTS AND NOT ROCKE_INSTALL_PYTHON_TESTS))
+    set(_rocke_install_external_assets OFF)
+endif()
+
+set(_rocke_sdpa_graphs "")
+if(IS_DIRECTORY "${_rocke_sdpa_bundles}")
+    file(GLOB_RECURSE _rocke_sdpa_graphs CONFIGURE_DEPENDS
+         RELATIVE "${_rocke_sdpa_bundles}" "${_rocke_sdpa_bundles}/*.json")
+    # Keep this selection aligned with library/tests/sdpa/hipdnn_assets.py.
+    list(FILTER _rocke_sdpa_graphs INCLUDE REGEX "^[^/]+/SdpaFwd[^/]*/.+\\.json$")
+    list(FILTER _rocke_sdpa_graphs EXCLUDE REGEX "(meta|support|sweep)\\.json$")
+    list(FILTER _rocke_sdpa_graphs EXCLUDE REGEX "(^|/)Default/")
+endif()
+
+set(_rocke_dense_geometry_header
+    "${_rocke_pack_headers}/Gfx950AttentionDenseGeometry.hpp")
+set(_rocke_unified_geometry_header
+    "${_rocke_pack_headers}/Gfx950AttentionUnified3DGeometry.hpp")
+set(_rocke_external_assets_available OFF)
+if(_rocke_install_external_assets
+   AND EXISTS "${_rocke_sdpa_template}"
+   AND NOT IS_DIRECTORY "${_rocke_sdpa_template}"
+   AND _rocke_sdpa_graphs
+   AND EXISTS "${_rocke_dense_geometry_header}"
+   AND EXISTS "${_rocke_unified_geometry_header}")
+    set(_rocke_external_assets_available ON)
+endif()
+
+if(ROCKE_REQUIRE_EXTERNAL_TEST_ASSETS AND NOT _rocke_install_external_assets)
+    message(FATAL_ERROR
+            "rocKE external test assets require ROCKE_INSTALL_TESTS and "
+            "ROCKE_INSTALL_PYTHON_TESTS")
+endif()
+if(ROCKE_REQUIRE_EXTERNAL_TEST_ASSETS AND NOT _rocke_external_assets_available)
+    message(FATAL_ERROR
+            "rocKE required external test assets are incomplete; provide the "
+            "hipDNN SDPA template, an eligible graph bundle, and both provider "
+            "geometry headers")
+endif()
+
+if(_rocke_external_assets_available)
+    set(ROCKE_LIBRARY_SDPA_PYTEST_ARGS "--rocke-require-hipdnn-assets")
+endif()
+
 add_subdirectory(platform)
+
+if(_rocke_external_assets_available)
+    if(ROCKE_INSTALL_PROVIDER_CTEST_SUBDIR)
+        set(_rocke_test_install_dir
+            "${CMAKE_INSTALL_BINDIR}/${ROCKE_INSTALL_PROVIDER_CTEST_SUBDIR}")
+    else()
+        set(_rocke_test_install_dir "${CMAKE_INSTALL_BINDIR}")
+    endif()
+
+    set(_rocke_sdpa_hipdnn_dest
+        "${_rocke_test_install_dir}/tests/library/tests/sdpa/hipdnn")
+    install(FILES "${_rocke_sdpa_template}"
+            DESTINATION "${_rocke_sdpa_hipdnn_dest}"
+            RENAME "attention_sdpa_fwd.graph.json"
+            COMPONENT rocke_external_test_assets)
+    foreach(_rocke_sdpa_graph IN LISTS _rocke_sdpa_graphs)
+        cmake_path(GET _rocke_sdpa_graph PARENT_PATH _rocke_sdpa_graph_dir)
+        install(FILES "${_rocke_sdpa_bundles}/${_rocke_sdpa_graph}"
+                DESTINATION "${_rocke_sdpa_hipdnn_dest}/integration-test-bundles/${_rocke_sdpa_graph_dir}"
+                COMPONENT rocke_external_test_assets)
+    endforeach()
+
+    install(FILES "${_rocke_dense_geometry_header}"
+                  "${_rocke_unified_geometry_header}"
+            DESTINATION "${_rocke_test_install_dir}/tests/library/tests/hkp_packs"
+            COMPONENT rocke_external_test_assets)
+endif()

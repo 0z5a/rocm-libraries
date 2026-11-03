@@ -535,6 +535,16 @@ The published convolution lane uses the same workflow for its forward cohort.
 Inspect collection and GPU comparison counts separately from host-test passes;
 directory coverage alone does not establish GPU correctness.
 
+**Embedded host-test assets.** The rocKE umbrella CMake project, not the
+standalone `platform/` project, stages external assets used by installed library
+tests: the hipDNN SDPA template and eligible graphs, plus the provider geometry
+headers. TheRock provider builds default `ROCKE_REQUIRE_EXTERNAL_TEST_ASSETS`
+to `ON`; other embeddings may enable it explicitly so missing content fails
+configuration rather than turning installed checks into skips. Standalone
+platform builds have no external-asset dependency. Alternate embeddings may set
+`ROCKE_HIPDNN_SDPA_TEMPLATE`, `ROCKE_HIPDNN_SDPA_BUNDLES`, and
+`ROCKE_PROVIDER_PACK_HEADERS`; paths may be native Windows or POSIX paths.
+
 **Harness lane bridge.** The differential harness numbers its lanes `L1…L6` (L1
 `verify`, L3 `ll` = the byte-identity gate, L5 the golden anchor, L6 numeric). Read
 L3 ↔ [§4.3](#43-do-the-two-implementations-agree-the-migration-gate), L5 ↔
