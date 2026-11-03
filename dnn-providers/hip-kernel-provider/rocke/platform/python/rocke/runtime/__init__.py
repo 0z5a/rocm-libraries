@@ -24,6 +24,11 @@ edge:
                       executable`. Provides `build_hsaco_from_llvm_ir`.
                       Steady-state ~1.2 ms per kernel.
 
+  - ``compiler_options``: the measured table of which ``-mllvm`` options
+                      each LLVM major accepts. A compile that needs one the
+                      loaded compiler refuses raises
+                      `CompilerOptionNotAccepted`.
+
   - ``hip_module``  : ctypes wrapper over `libamdhip64.so`. Bare
                       minimum for `hipModuleLoadData`,
                       `hipModuleLaunchKernel`, `hipMalloc`,
@@ -91,6 +96,7 @@ When to drop to the lower-level APIs:
 from __future__ import annotations
 
 from .comgr import ComgrError, ComgrTimings, build_hsaco_from_llvm_ir
+from .compiler_options import CompilerOptionNotAccepted
 from .device_info import DeviceInfo, get_device_info
 from .hip_module import HipError, Runtime
 from .launcher import (
@@ -118,6 +124,7 @@ from .torch_interop import (
 __all__ = [
     "ComgrError",
     "ComgrTimings",
+    "CompilerOptionNotAccepted",
     "DeviceInfo",
     "DeviceMem",
     "HipError",
