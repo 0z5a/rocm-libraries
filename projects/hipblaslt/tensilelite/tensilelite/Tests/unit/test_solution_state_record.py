@@ -18,6 +18,7 @@ builds, and not the assembler object Solution keeps beside them.
 import contextlib
 import io
 import json
+import copy
 from pathlib import Path
 
 import msgpack
@@ -152,6 +153,23 @@ def test_msgpack_state_matches_yaml(name):
     derived = _load_derived(name)
     packed = (records_dir() / f"{name}.msgpack").read_bytes()
     assert msgpack.unpackb(packed, strict_map_key=False) == derived
+
+
+def test_mx_block_free_is_recorded_with_mx_predicates():
+    derived = copy.deepcopy(_load_derived("gfx950-plain"))
+    derived["ProblemType"]["MXBlockA"] = 16
+    derived["ProblemType"]["MXBlockFreeA"] = 7
+    record = library_record(derived)
+    assert record["problemType"]["mxBlockFreeA"] == 7
+    assert "MXBlockA" in record["problemPredicate"]
+    assert "MXBlockFreeA" in record["problemPredicate"]
+
+
+def test_occupancy_probe_support_is_recorded():
+    derived = copy.deepcopy(_load_derived("gfx950-plain"))
+    derived["InternalSupportParams"]["SupportOccupancyProbe"] = True
+    record = library_record(derived)
+    assert record["internalArgsSupport"]["occupancyProbe"] is True
 
 
 def _pack(value):

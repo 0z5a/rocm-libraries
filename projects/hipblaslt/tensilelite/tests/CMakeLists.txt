@@ -68,6 +68,20 @@ target_sources(tensilelite-tests
 # (see tensilelite/src/Tensile.cpp). The test also writes msgpack mapping
 # files directly via <msgpack.hpp>, so it has no meaning in YAML builds.
 if(NOT TENSILELITE_ENABLE_YAML)
+    set(SOLUTION_STATE_RECORD_SOURCE_DIR
+        "${CMAKE_CURRENT_SOURCE_DIR}/../tensilelite/Tests/unit/test_data/solution_records")
+    set(SOLUTION_STATE_RECORD_DIR "${TEST_DATA_DIR}/solution-state-record")
+    file(MAKE_DIRECTORY "${SOLUTION_STATE_RECORD_DIR}")
+    file(COPY "${SOLUTION_STATE_RECORD_SOURCE_DIR}/" DESTINATION "${SOLUTION_STATE_RECORD_DIR}")
+
+    set(SOLUTION_STATE_CATALOG_SOURCE_DIR
+        "${CMAKE_CURRENT_SOURCE_DIR}/../tensilelite/Tests/unit/test_data")
+    set(SOLUTION_STATE_CATALOG_DIR "${TEST_DATA_DIR}/solution-state-catalog")
+    file(MAKE_DIRECTORY "${SOLUTION_STATE_CATALOG_DIR}")
+    file(COPY "${SOLUTION_STATE_CATALOG_SOURCE_DIR}/catalog_chip_ids.txt"
+              "${SOLUTION_STATE_CATALOG_SOURCE_DIR}/catalog_data_types.txt"
+         DESTINATION "${SOLUTION_STATE_CATALOG_DIR}")
+
     target_sources(tensilelite-tests
         PRIVATE
             "${CMAKE_CURRENT_SOURCE_DIR}/MasterSolutionLibraryMapping_test.cpp"
@@ -80,9 +94,8 @@ if(NOT TENSILELITE_ENABLE_YAML)
             "${CMAKE_CURRENT_SOURCE_DIR}/SolutionRecord_test.cpp"
     )
     target_compile_definitions(tensilelite-tests PRIVATE
-        "TENSILELITE_SOLUTION_RECORD_DIR=\"${CMAKE_CURRENT_SOURCE_DIR}/../tensilelite/Tests/unit/test_data/solution_records\""
-        "TENSILELITE_SOLUTION_STATE_CPP=\"${CMAKE_CURRENT_SOURCE_DIR}/../src/msgpack/SolutionState.cpp\""
-        "TENSILELITE_SOLUTION_CATALOG_DIR=\"${CMAKE_CURRENT_SOURCE_DIR}/../tensilelite/Tests/unit/test_data\"")
+        "TENSILELITE_SOLUTION_RECORD_DIR=\"${SOLUTION_STATE_RECORD_DIR}\""
+        "TENSILELITE_SOLUTION_CATALOG_DIR=\"${SOLUTION_STATE_CATALOG_DIR}\"")
 endif()
 
 if(TENSILELITE_ENABLE_YAML)
