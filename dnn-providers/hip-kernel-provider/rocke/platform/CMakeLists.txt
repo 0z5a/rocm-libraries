@@ -758,8 +758,7 @@ if(ROCKE_INSTALL_TESTS)
         "tests/library/tests/test_fmha_mfma_free_stride.py"
         "tests/library/tests/test_sdpa_free_stride_layouts.py"
         "tests/library/tests/test_bwd_memo_bound.py"
-        "tests/library/tests/test_attention_bwd_counted_sync.py"
-        "tests/library/tests/test_library_test_tiers.py")
+        "tests/library/tests/test_attention_bwd_counted_sync.py")
     set(_ROCKE_LIBRARY_ATTENTION_CPU_TESTS "")
     foreach(_t ${_ROCKE_LIBRARY_ATTENTION_CPU_TEST_RELPATHS})
       string(APPEND _ROCKE_LIBRARY_ATTENTION_CPU_TESTS
@@ -770,6 +769,17 @@ if(ROCKE_INSTALL_TESTS)
     string(APPEND _ROCKE_INSTALLED_CTEST_ENTRIES
            "set_tests_properties(rocke_library_attention_cpu_pytest PROPERTIES\n"
            "  LABELS \"ckc\\;python\\;attention\\;host\\;quick\"\n"
+           "  ENVIRONMENT \"PYTHONPATH=${ROCKE_TEST_CTEST_REL}tests/library\"\n"
+           "  TIMEOUT 180)\n")
+
+    # Runner and explicit-gate policy contracts are orchestration tests, not
+    # attention behavior. Keep their nested-pytest coverage in an independently
+    # named host entry with its own timeout and tier ownership.
+    string(APPEND _ROCKE_INSTALLED_CTEST_ENTRIES
+           "add_test(rocke_library_runner_contract_pytest python -m pytest \"${ROCKE_TEST_CTEST_REL}tests/library/tests/test_library_test_tiers.py\" -v -rs --timeout=30)\n")
+    string(APPEND _ROCKE_INSTALLED_CTEST_ENTRIES
+           "set_tests_properties(rocke_library_runner_contract_pytest PROPERTIES\n"
+           "  LABELS \"ckc\\;python\\;host\\;runner\\;quick\"\n"
            "  ENVIRONMENT \"PYTHONPATH=${ROCKE_TEST_CTEST_REL}tests/library\"\n"
            "  TIMEOUT 180)\n")
 
