@@ -112,6 +112,10 @@ def parseArguments(input: Optional[List[str]] = None) -> Dict[str, Any]:
     )
     argParser.add_argument("--version", help="Version string to embed into library file.")
     argParser.add_argument(
+        "--solution-index-start", dest="SolutionIndexStart", type=int, default=0,
+        help="First global solution index; permits a scoped family rebuild in an existing catalog.",
+    )
+    argParser.add_argument(
         "--logic-format",
         dest="LogicFormat",
         choices=["yaml", "json"],
@@ -229,11 +233,14 @@ def parseArguments(input: Optional[List[str]] = None) -> Dict[str, Any]:
     )
 
     args = argParser.parse_args()
+    if args.SolutionIndexStart < 0:
+        argParser.error("--solution-index-start must be nonnegative")
 
     arguments = {}
     arguments["RuntimeLanguage"] = args.RuntimeLanguage
     arguments["CodeObjectVersion"] = coVersionMap[args.CodeObjectVersion]
     arguments["Architecture"] = args.Architecture
+    arguments["SolutionIndexStart"] = args.SolutionIndexStart
     arguments["LazyLibraryLoading"] = args.LazyLibraryLoading
     arguments["EnableMarker"] = args.EnableMarker
     arguments["DisableAsmComments"] = args.DisableAsmComments

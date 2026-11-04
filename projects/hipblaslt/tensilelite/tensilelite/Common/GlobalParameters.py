@@ -914,6 +914,7 @@ _GLOBAL_PARAMETER_IGNORE_KEYS = [
     "EnableGemmA2AFusion", # --enable-gemm-a2a-fusion toggle in ParseArguments
     "GenSolTable",        # --gen-sol-table toggle in ParseArguments
     "BuildGfx1250v0",     # --gfx1250v0 toggle in ParseArguments
+    "SolutionIndexStart", # --solution-index-start, consumed by library index allocation
     # Keys with a sanctioned opt-out from the strict gate:
     #   - Live but read via DebugConfig (makeDebugConfig in
     #     tensilelite/Common/Types.py) directly from the raw config dict

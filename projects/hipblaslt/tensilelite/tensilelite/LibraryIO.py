@@ -817,6 +817,15 @@ def parseLibraryLogicData(
             data.get("ExactLogic"), newLibrary, typeMismatches)
 
 
+def _copyExactLogicLeadingDimensionsFlag(source, destination):
+    """Preserve an explicitly declared layout flag across logic formats."""
+    key = "ExactLogicIncludesLeadingDimensions"
+    if key in source:
+        if type(source[key]) is not bool:
+            raise ValueError(f"{key} must be a Boolean")
+        destination[key] = source[key]
+
+
 def parseLibraryLogicList(data, srcFile="?"):
     """Parses the data of a matching table style library logic file."""
     if len(data) < 9:
@@ -834,6 +843,7 @@ def parseLibraryLogicList(data, srcFile="?"):
         # key existed parses to exactly the dict it did before.
         if data[2].get("UseKdTree", False):
             rv["UseKdTree"] = True
+        _copyExactLogicLeadingDimensionsFlag(data[2], rv)
     else:
         rv["ArchitectureName"] = data[2]
         rv["CUCount"] = None
@@ -891,7 +901,8 @@ def rawLibraryLogic(data):
         architectureName = data.get("ArchitectureName")
         cuCount = data.get("CUCount")
         useKdTree = data.get("UseKdTree", False)
-        if cuCount is not None or useKdTree:
+        if (cuCount is not None or useKdTree
+                or "ExactLogicIncludesLeadingDimensions" in data):
             architectureName = {"Architecture": architectureName}
             # Each key is emitted only when set, so unaffected files round-trip
             # byte-identically and a table that is not CU-scoped can still
@@ -900,6 +911,7 @@ def rawLibraryLogic(data):
                 architectureName["CUCount"] = cuCount
             if useKdTree:
                 architectureName["UseKdTree"] = True
+            _copyExactLogicLeadingDimensionsFlag(data, architectureName)
 
         deviceNames = data.get("DeviceNames")
         problemTypeState = data.get("ProblemType")

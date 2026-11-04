@@ -1443,7 +1443,9 @@ def generateLogicDataAndSolutions(logicFiles, args, assembler: Assembler, isaInf
     raiseIfTypeMismatches()
 
     # Sort masterLibraries to make global soln index values deterministic
-    solnReIndex = 0
+    solnReIndex = args.get("SolutionIndexStart", 0)
+    if type(solnReIndex) is not int or solnReIndex < 0:
+        raise ValueError("SolutionIndexStart must be a nonnegative integer")
     masterLibraries = dict(sorted(masterLibraries.items()))
     for _, masterLibrary in masterLibraries.items():
         for _, sol in masterLibrary.solutions.items():

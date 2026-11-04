@@ -23,6 +23,7 @@
 ################################################################################
 
 from typing import Dict
+import math
 
 from . import Properties
 from . import Hardware
@@ -418,6 +419,51 @@ class MasterSolutionLibrary:
             else:
                 solutionsSoFar.add(solution.index)
 
+    @staticmethod
+    def exactLayoutRows(table, solutions):
+        """Compile eight-field GEMM ExactLogic rows without dropping strides.
+
+        Canonical sizes are [M, N, batch, K, LDD, LDC, LDA, LDB].
+        Equality tables are guarded by A/B/C/D strides and retain the stored
+        efficiency, including zero. Four-field GridBased rows stay fallback.
+        Existing solution objects preserve support predicates and reindexing.
+        """
+        byIndex = {solution.index: solution for solution in solutions}
+        groups = {}
+        seen = set()
+        for sizes, winner in table:
+            if (not isinstance(sizes, list) or len(sizes) != 8
+                    or any(type(value) is not int or value <= 0 for value in sizes)):
+                raise ValueError("ExactLogic layout requires eight positive integers")
+            if (not isinstance(winner, list) or len(winner) != 2
+                    or type(winner[0]) is not int or winner[0] not in byIndex):
+                raise ValueError("ExactLogic layout references a missing SolutionIndex")
+            speed = winner[1]
+            if (type(speed) not in (int, float) or not math.isfinite(speed) or speed < 0):
+                raise ValueError("ExactLogic efficiency must be finite and nonnegative")
+            identity = tuple(sizes)
+            if identity in seen:
+                raise ValueError(f"Duplicate ExactLogic layout {identity}")
+            seen.add(identity)
+            ldd, ldc, lda, ldb = sizes[4:]
+            group = groups.setdefault((lda, ldb, ldc, ldd), [])
+            group.append({"key": sizes[:4], "index": IndexSolutionLibrary(byIndex[winner[0]]),
+                          "speed": float(speed)})
+
+        properties = [Properties.Property(tag, index=0)
+                      for tag in ("FreeSizeA", "FreeSizeB", "BatchSize", "BoundSize")]
+        rows = []
+        for strides, entries in sorted(groups.items()):
+            predicates = [Contractions.ProblemPredicate(f"Stride{tensor}Equal", index=1, value=ld)
+                          for tensor, ld in zip("ABCD", strides)]
+            equality = PredicateLibrary(tag="Problem")
+            equality.rows.append({"predicate": Properties.Predicate(tag="EqualityMatching"),
+                "library": MatchingLibrary(properties, sorted(entries, key=lambda row: row["key"]),
+                                           "Equality", False)})
+            rows.append({"predicate": Contractions.ProblemPredicate.And(predicates),
+                         "library": equality})
+        return rows
+
     @classmethod
     def FromOriginalState(cls,
                           origData,
@@ -432,6 +478,22 @@ class MasterSolutionLibrary:
                           solutionClass=Contractions.Solution,
                           libraryOrder=None,
                           placeholderName='TensileLibrary'):
+
+        # Legacy GridBased tables may contain eight-field rows whose leading
+        # dimensions were ignored. Preserve that interpretation unless this
+        # logic file explicitly opts into layout-sensitive exact matching.
+        exactLayouts = origData.get("ExactLogicIncludesLeadingDimensions", False)
+        if type(exactLayouts) is not bool:
+            raise ValueError("ExactLogicIncludesLeadingDimensions must be a Boolean")
+        if exactLayouts:
+            originalProblem = origData["ProblemType"]
+            matchingState = origData["Library"]
+            if (origData["LibraryType"] != "Matching"
+                    or matchingState.get("distance") != "GridBased"
+                    or originalProblem.get("OperationType") != "GEMM"
+                    or originalProblem.get("IndexAssignmentsLD") != [4, 5, 6, 7]
+                    or matchingState.get("indexOrder") != [2, 3, 0, 1]):
+                raise ValueError("Layout-sensitive ExactLogic requires four-index GridBased GEMM logic")
 
         # functions for creating each "level" of the library
         def hardware(d, problemType, solutions, library, placeholderName):
@@ -487,8 +549,17 @@ class MasterSolutionLibrary:
                 else:
                     predicate = Properties.Predicate(tag="GridBasedMatching") # to make different from TruePred
 
-                matchingLib = MatchingLibrary.FromOriginalState(d["Library"], solutions, d["ProblemType"])
+                matchingState = d["Library"]
+                layoutRows = []
+                if exactLayouts:
+                    layouts = [row for row in matchingState["table"] if len(row[0]) == 8]
+                    if layouts:
+                        layoutRows = cls.exactLayoutRows(layouts, solutions)
+                        matchingState = dict(matchingState)
+                        matchingState["table"] = [row for row in matchingState["table"] if len(row[0]) != 8]
+                matchingLib = MatchingLibrary.FromOriginalState(matchingState, solutions, d["ProblemType"])
                 library = PredicateLibrary(tag="Problem")
+                library.rows.extend(layoutRows)
                 library.rows.append({"predicate": predicate, "library": matchingLib})
             elif d["LibraryType"] == "FreeSize":
                 predicate = Properties.Predicate(tag="FreeSizeMatching")
