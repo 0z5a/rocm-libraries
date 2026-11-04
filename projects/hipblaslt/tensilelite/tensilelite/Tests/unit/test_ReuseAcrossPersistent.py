@@ -469,7 +469,7 @@ def test_a_rap_kernel_never_reaches_the_tail_loop_emitter(
     import rocisa
     from tensilelite.Common.Types import DebugConfig
     from tensilelite.SolutionStructs.Naming import getKernelFileBase
-    from tensilelite.TensileCreateLibrary.Run import generateKernelObjectsFromSolutions
+    from tensilelite.create_library.run import generateKernelObjectsFromSolutions
     from tensilelite.Tests.rocisa_test_state import preserve_rocisa_kernel_state
 
     sol = Solution(_make_params(gfx1250_iim, AssertSummationElementMultiple=32),
@@ -709,7 +709,7 @@ def test_rap_splats_each_resident_mx128_scale_before_it_is_read(
     import rocisa
     from tensilelite.Common.Types import DebugConfig
     from tensilelite.SolutionStructs.Naming import getKernelFileBase
-    from tensilelite.TensileCreateLibrary.Run import generateKernelObjectsFromSolutions
+    from tensilelite.create_library.run import generateKernelObjectsFromSolutions
     from tensilelite.Tests.rocisa_test_state import preserve_rocisa_kernel_state
 
     # MXBlock [128] or [128, 128] in a config, as ProblemType parses it.
