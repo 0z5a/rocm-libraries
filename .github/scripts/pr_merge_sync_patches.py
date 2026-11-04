@@ -86,7 +86,9 @@ def get_subtree_info(config: List[RepoEntry], subtrees: List[str]) -> List[RepoE
     return matched
 
 
-def _run_git(args: List[str], cwd: Optional[Path] = None) -> str:
+def _run_git(
+    args: List[str], cwd: Optional[Path] = None, *, log_failure: bool = True
+) -> str:
     """Run a git command and return stdout."""
     cmd = ["git"] + args
     logger.debug(f"Running git command: {' '.join(cmd)} (cwd={cwd})")
@@ -98,8 +100,12 @@ def _run_git(args: List[str], cwd: Optional[Path] = None) -> str:
         text=True,
     )
     if result.returncode != 0:
-        logger.error(f"Git command failed: {' '.join(cmd)}\n{result.stderr}")
-        raise RuntimeError(f"Git command failed: {' '.join(cmd)}\n{result.stderr}")
+        message = f"Git command failed: {' '.join(cmd)}\n{result.stderr}"
+        if log_failure:
+            logger.error(message)
+        else:
+            logger.debug(message)
+        raise RuntimeError(message)
     return result.stdout.strip()
 
 
@@ -128,9 +134,37 @@ def _configure_git_user(repo_path: Path) -> None:
 
 
 def _apply_patch(repo_path: Path, patch_path: Path) -> None:
-    """Apply a patch file to the working tree."""
-    _run_git(["apply", str(patch_path)], cwd=repo_path)
+    """Apply a patch, falling back to a three-way merge for drifted context."""
+    try:
+        _run_git(["apply", str(patch_path)], cwd=repo_path, log_failure=False)
+    except RuntimeError as strict_error:
+        logger.warning("Strict patch application failed; retrying with --3way")
+        try:
+            _run_git(["apply", "--3way", str(patch_path)], cwd=repo_path)
+        except RuntimeError as three_way_error:
+            raise RuntimeError(
+                "Patch application failed in both modes.\n\n"
+                f"Strict apply failure:\n{strict_error}\n\n"
+                f"Three-way apply failure:\n{three_way_error}"
+            ) from three_way_error
     logger.info(f"Applied patch to working tree at {repo_path}")
+
+
+def _sync_annotation(monorepo_url: str, pr_number: int, merge_sha: str) -> str:
+    """Return the first-line provenance annotation for a mirrored commit."""
+    return f"[rocm-libraries] {monorepo_url}#{pr_number} (commit {merge_sha[:7]})"
+
+
+def _is_already_synced(
+    repo_path: Path, monorepo_url: str, pr_number: int, merge_sha: str
+) -> bool:
+    """Return whether the mirror log contains this exact sync commit subject."""
+    marker = _sync_annotation(monorepo_url, pr_number, merge_sha)
+    subjects = _run_git(
+        ["log", "--format=%s", "--fixed-strings", f"--grep={marker}"],
+        cwd=repo_path,
+    )
+    return marker in subjects.splitlines()
 
 
 def _stage_changes(repo_path: Path) -> None:
@@ -173,10 +207,8 @@ def _format_commit_message(
     monorepo_url: str, pr_number: int, merge_sha: str, original_msg: str
 ) -> str:
     """Prepend a sync annotation to the original commit message."""
-    annotation = (
-        f"[rocm-libraries] {monorepo_url}#{pr_number} (commit {merge_sha[:7]})\n\n"
-    )
-    return annotation + original_msg
+    annotation = _sync_annotation(monorepo_url, pr_number, merge_sha)
+    return f"{annotation}\n\n{original_msg}"
 
 
 def _commit_changes(
@@ -326,6 +358,11 @@ def apply_patch_to_subrepo(
     with tempfile.TemporaryDirectory() as tmpdir:
         subrepo_path = Path(tmpdir) / entry.name
         _clone_subrepo(entry.url, entry.branch, subrepo_path)
+        if _is_already_synced(subrepo_path, monorepo_url, monorepo_pr, merge_sha):
+            logger.info(
+                f"Skipping {entry.url}: monorepo PR #{monorepo_pr} is already synced"
+            )
+            return
         if dry_run:
             logger.info(
                 f"[Dry-run] Would apply patch to {entry.url} as {author_name} <{author_email}>"
