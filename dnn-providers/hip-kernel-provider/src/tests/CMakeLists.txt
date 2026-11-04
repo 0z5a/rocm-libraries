@@ -495,6 +495,25 @@ if(HIPDNN_ENABLE_KERNEL_INGESTOR)
         )
     endif()
 
+    # Hand-written companion census over the dense engine's shard: a ragged graph and a
+    # graph declaring a non-default alignment, both stamped engine API 1.3.0, are declined
+    # by GenericPlanBuilder's schema gate because the descriptor declares sdk_version 1.0.0
+    # and graph_match checks neither feature. Its own call because a pin names one suite's
+    # cases. IngestorGenerator's test_gfx950_attention_dense_schema_gate pins the same
+    # sdk_version where no gfx950 shard is built.
+    if(_hkp_gfx950_attention_dense)
+        hkp_register_census_tests(
+            TARGET hip_kernel_provider_census_tests
+            PACK_NAME product
+            ARCHES gfx950
+            SUITES TestGfx950AttentionDenseSchemaGate
+            EXPECTED_CASES
+                DeclinesARaggedGraphAtTheSchemaGate
+                DeclinesANonDefaultAlignmentGraphAtTheSchemaGate
+                PassesTheBaselineGraphThroughTheSchemaGate
+        )
+    endif()
+
     # One generic kernel set per RDNA family ships in every RDNA3/3.5 and RDNA4 shard,
     # as two engines: the prefill objects and the split-KV decode objects (the wide-Q
     # prefill and D256 decode geometries differ per family). The census checks each wired
