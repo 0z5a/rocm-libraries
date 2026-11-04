@@ -21,7 +21,9 @@ Checks performed:
 * **Arity / result counts** — per-opcode operand and result counts where the
   builder guarantees them (binary arith, ``cf.return``, ``scf.yield``, etc.).
 * **Region well-formedness** — ``scf.for`` / ``scf.if`` carry their required
-  regions; loop-carried values are typed; the kernel body ends in a terminator.
+  regions; loop-carried values are typed; the kernel body ends in a terminator;
+  every ``scf.yield`` is directly in an ``scf.for`` body or a branch of an
+  ``scf.if_else`` with results.
 * **Attr maps** — required keys present per opcode; enum-valued attrs legal.
 * **Vector / smem / addrspace sanity** — vector widths > 0, smem shapes
   positive, pointer address spaces from the known set.
@@ -38,6 +40,7 @@ from .ir import (
     _FENCE_ORDERINGS,
     _FENCE_SCOPES,
     _FLAG_STORE_ORDERINGS,
+    _ORPHAN_YIELD_ERROR,
     _assume_range_errors,
     _buffer_op_bytes,
     _if_else_yields,
@@ -46,7 +49,8 @@ from .ir import (
     _int_add_wrap_error,
     _int_cmp_pred_error,
     _is_flag_ptr,
-    _scf_for_carried_descriptor_error,
+    _orphan_yield,
+    _scf_for_error,
     KernelDef,
     Op,
     Region,
@@ -185,6 +189,11 @@ class _Verifier:
             param_names.add(vname)
 
         self._check_region(self.kernel.body, scope, is_kernel_body=True)
+        # The kernel body takes no yields; an scf.for or scf.if_else checks the
+        # yields its own regions hold.
+        orphan = _orphan_yield(self.kernel.body.ops)
+        if orphan is not None:
+            self.err(_ORPHAN_YIELD_ERROR, orphan)
         return self.diags
 
     # ---- type sanity ----
@@ -536,9 +545,9 @@ class _Verifier:
                         f"type {init.type.name}",
                         op,
                     )
-        descriptor_error = _scf_for_carried_descriptor_error(op)
-        if descriptor_error is not None:
-            self.err(descriptor_error, op)
+        loop_error = _scf_for_error(op)
+        if loop_error is not None:
+            self.err(loop_error, op)
 
         # body scope: copy + iv + iter-arg block values
         body_scope = dict(scope)
