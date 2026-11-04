@@ -43,7 +43,10 @@
 #include "core/Handle.hpp"
 #include "engines/asm_sdpa_engine/plans/SdpaPlanUtils.hpp"
 #include "engines/kernel_ingestor_engine/IngestorKernelCode.hpp"
+#include "engines/kernel_ingestor_engine/IngestorLaunchRestore.hpp"
 #include "engines/kernel_ingestor_engine/IngestorPacks.hpp"
+#include "engines/kernel_ingestor_engine/IngestorPreparedDispatch.hpp"
+#include "engines/kernel_ingestor_engine/packs/AttentionPagedUnifiedLaunchValues.hpp"
 #include "engines/kernel_ingestor_engine/packs/SdpaGraphMatch.hpp"
 
 /**
@@ -922,47 +925,23 @@ std::vector<KernelArgument> kernelSignature()
     return signature;
 }
 
-/// Every by-value launch argument, resolved once at prepare().
-struct LaunchScalars
-{
-    float scale = 0.0F;
-    int32_t numSeqs = 0;
-    int32_t blockTableStride = 0;
-    int32_t numQueryHeads = 0;
-    int32_t numKvHeads = 0;
-    int32_t slidingWindow = 0;
-    int32_t qUniformLen = 0;
-    QueryLayout q;
-    QueryLayout o;
-    int32_t kvBlockStride = 0;
-    int32_t kvTokStride = 0;
-    int32_t kvHeadStride = 0;
-    int32_t kvBlockSpanBytes = 0;
-    int32_t qBlockGrid = 0;
-};
+/// Every by-value launch argument, resolved once at prepare() or read from a saved plan.
+using LaunchScalars = AttentionPagedUnifiedScalars;
+using BoundUids = AttentionPagedUnifiedUids;
+static_assert(NO_UID == ATTENTION_PAGED_UNIFIED_NO_UID, "a saved absent uid must read as absent");
 
-struct BoundUids
-{
-    int64_t q = 0;
-    int64_t k = 0;
-    int64_t v = 0;
-    int64_t o = 0;
-    int64_t pageTableK = 0;
-    int64_t pageTableV = 0;
-    int64_t seqLenKv = 0;
-    int64_t seqLenQ = 0;
-    int64_t raggedOffset = NO_UID;
-    int64_t sink = NO_UID;
-};
-
-class PreparedAttentionPagedUnified : public PreparedDispatch
+class PreparedAttentionPagedUnified : public IngestorPreparedDispatch
 {
 public:
-    PreparedAttentionPagedUnified(IngestorKernelCode code, BoundUids uids, LaunchScalars scalars)
+    PreparedAttentionPagedUnified(IngestorKernelCode code, AttentionPagedUnifiedLaunchInputs launch)
         : _code(std::move(code))
-        , _uids(uids)
-        , _scalars(scalars)
+        , _launch(launch)
     {
+    }
+
+    const IngestorKernelCode& kernelCode() const override
+    {
+        return _code;
     }
 
     compilation::IRunnableKernel& kernelForStream(hipStream_t stream) const
@@ -970,21 +949,38 @@ public:
         return _code.kernelForStream(stream);
     }
 
+    const AttentionPagedUnifiedLaunchInputs& launchInputs() const
+    {
+        return _launch;
+    }
+
     const BoundUids& uids() const
     {
-        return _uids;
+        return _launch.uids;
     }
 
     const LaunchScalars& scalars() const
     {
-        return _scalars;
+        return _launch.scalars;
     }
 
 private:
     IngestorKernelCode _code;
-    BoundUids _uids;
-    LaunchScalars _scalars;
+    AttentionPagedUnifiedLaunchInputs _launch;
 };
+
+/// Applies the launch geometry to @p code and builds the prepared dispatch. A plan built
+/// from a graph and a plan restored from a saved payload both come through here.
+std::unique_ptr<PreparedDispatch>
+    makePreparedAttentionPagedUnified(IngestorKernelCode code,
+                                      const AttentionPagedUnifiedLaunchInputs& launch)
+{
+    code.setBlockSize(static_cast<unsigned int>(launch.blockThreads), 1, 1);
+    code.setGridSize(static_cast<unsigned int>(launch.scalars.numKvHeads),
+                     static_cast<unsigned int>(launch.scalars.qBlockGrid),
+                     1);
+    return std::make_unique<PreparedAttentionPagedUnified>(std::move(code), launch);
+}
 
 int32_t narrow(int64_t value, std::string_view what)
 {
@@ -1074,23 +1070,19 @@ public:
         s.numKvHeads = narrow(numKvHeads, "KV heads");
         s.slidingWindow = narrow(readBound(bound, WINDOW_TOKEN), "window");
         s.qUniformLen = ragged ? 0 : narrow(seqLenQ, "query length");
-        s.q = queryLayout(q, ragged);
-        s.o = queryLayout(o, ragged);
+        const auto narrowStrides = [](const QueryLayout& layout) {
+            return AttentionPagedUnifiedQueryStrides{narrow(layout.seqStride, "Q/O stride"),
+                                                     narrow(layout.tokenStride, "Q/O stride"),
+                                                     narrow(layout.headStride, "Q/O stride")};
+        };
+        s.q = narrowStrides(queryLayout(q, ragged));
+        s.o = narrowStrides(queryLayout(o, ragged));
         const auto kStrides = effectiveStrides(k);
         s.kvBlockStride = narrow(kStrides[BATCH_AXIS], "K/V block stride");
         s.kvTokStride = narrow(kStrides[SEQ_AXIS], "K/V token stride");
         s.kvHeadStride = narrow(kStrides[HEAD_AXIS], "K/V head stride");
         const auto kvExtent = innerExtent(k);
         s.kvBlockSpanBytes = narrow(kvExtent.value_or(-1) * ELEMENT_BYTES, "K/V block span");
-        for(const auto value : {s.q.seqStride,
-                                s.q.tokenStride,
-                                s.q.headStride,
-                                s.o.seqStride,
-                                s.o.tokenStride,
-                                s.o.headStride})
-        {
-            narrow(value, "Q/O stride");
-        }
 
         // q-block grid: exact for a dense Q; for a ragged Q, enough blocks for every
         // sequence when the batch's tokens fit in Sq (the serving convention) -- the kernel's
@@ -1100,10 +1092,36 @@ public:
         s.qBlockGrid = static_cast<int32_t>(std::min(std::max<int64_t>(gridY, 1), MAX_GRID_Y));
 
         auto code = buildIngestorKernelCode(_loader, context, kernel, kernelSignature());
-        code.setBlockSize(static_cast<unsigned int>(geometry->threads), 1, 1);
-        code.setGridSize(
-            static_cast<unsigned int>(numKvHeads), static_cast<unsigned int>(s.qBlockGrid), 1);
-        return std::make_unique<PreparedAttentionPagedUnified>(std::move(code), uids, s);
+        return makePreparedAttentionPagedUnified(
+            std::move(code),
+            AttentionPagedUnifiedLaunchInputs{
+                uids, s, narrow(geometry->threads, "threads per block")});
+    }
+
+    std::unique_ptr<PreparedDispatch> restoreLaunch(const SavedLaunchInputs& inputs,
+                                                    SavedKernelCode code,
+                                                    int deviceOrdinal) const override
+    {
+        auto restored = restoreIngestorLaunch<AttentionPagedUnifiedLaunchInputs>(
+            inputs,
+            std::move(code),
+            kernelSignature(),
+            &readAttentionPagedUnifiedLaunchInputs,
+            deviceOrdinal);
+        return makePreparedAttentionPagedUnified(std::move(restored.code), restored.launch);
+    }
+
+    std::optional<SavedLaunchInputs>
+        saveLaunchInputs(const PreparedDispatch& prepared) const override
+    {
+        const auto& p = dynamic_cast<const PreparedAttentionPagedUnified&>(prepared);
+        return SavedLaunchInputs{std::string(ATTENTION_PAGED_UNIFIED_DISPATCH_SYMBOL_V1),
+                                 attentionPagedUnifiedLaunchValues(p.launchInputs())};
+    }
+
+    bool supportsSaving() const override
+    {
+        return true;
     }
 
     void launch(const Handle& handle,
@@ -1173,12 +1191,12 @@ public:
                     seqLenQ,
                     int32_t{1}, // has_seq_lens_q: a paged graph always carries seq_len_q
                     s.qUniformLen,
-                    static_cast<int32_t>(s.q.seqStride),
-                    static_cast<int32_t>(s.q.tokenStride),
-                    static_cast<int32_t>(s.q.headStride),
-                    static_cast<int32_t>(s.o.seqStride),
-                    static_cast<int32_t>(s.o.tokenStride),
-                    static_cast<int32_t>(s.o.headStride),
+                    s.q.seqStride,
+                    s.q.tokenStride,
+                    s.q.headStride,
+                    s.o.seqStride,
+                    s.o.tokenStride,
+                    s.o.headStride,
                     s.kvBlockStride,
                     s.kvTokStride,
                     s.kvHeadStride,
@@ -1198,6 +1216,156 @@ compilation::KpackModuleCache& moduleCache()
 
 } // namespace
 
+MetadataValues attentionPagedUnifiedLaunchValues(const AttentionPagedUnifiedLaunchInputs& launch)
+{
+    const auto& u = launch.uids;
+    const auto& s = launch.scalars;
+    const auto value = [](std::string_view name, int64_t number) {
+        return std::pair<const std::string, MetadataValue>{std::string(name), number};
+    };
+    return {value(ATTENTION_PAGED_UNIFIED_Q_UID_VALUE, u.q),
+            value(ATTENTION_PAGED_UNIFIED_K_UID_VALUE, u.k),
+            value(ATTENTION_PAGED_UNIFIED_V_UID_VALUE, u.v),
+            value(ATTENTION_PAGED_UNIFIED_O_UID_VALUE, u.o),
+            value(ATTENTION_PAGED_UNIFIED_PAGE_TABLE_K_UID_VALUE, u.pageTableK),
+            value(ATTENTION_PAGED_UNIFIED_PAGE_TABLE_V_UID_VALUE, u.pageTableV),
+            value(ATTENTION_PAGED_UNIFIED_SEQ_LEN_KV_UID_VALUE, u.seqLenKv),
+            value(ATTENTION_PAGED_UNIFIED_SEQ_LEN_Q_UID_VALUE, u.seqLenQ),
+            value(ATTENTION_PAGED_UNIFIED_RAGGED_OFFSET_UID_VALUE, u.raggedOffset),
+            value(ATTENTION_PAGED_UNIFIED_SINK_UID_VALUE, u.sink),
+            {std::string(ATTENTION_PAGED_UNIFIED_SCALE_VALUE), static_cast<double>(s.scale)},
+            value(ATTENTION_PAGED_UNIFIED_NUM_SEQS_VALUE, s.numSeqs),
+            value(ATTENTION_PAGED_UNIFIED_BLOCK_TABLE_STRIDE_VALUE, s.blockTableStride),
+            value(ATTENTION_PAGED_UNIFIED_NUM_QUERY_HEADS_VALUE, s.numQueryHeads),
+            value(ATTENTION_PAGED_UNIFIED_NUM_KV_HEADS_VALUE, s.numKvHeads),
+            value(ATTENTION_PAGED_UNIFIED_SLIDING_WINDOW_VALUE, s.slidingWindow),
+            value(ATTENTION_PAGED_UNIFIED_Q_UNIFORM_LEN_VALUE, s.qUniformLen),
+            value(ATTENTION_PAGED_UNIFIED_Q_SEQ_STRIDE_VALUE, s.q.seqStride),
+            value(ATTENTION_PAGED_UNIFIED_Q_TOK_STRIDE_VALUE, s.q.tokenStride),
+            value(ATTENTION_PAGED_UNIFIED_Q_HEAD_STRIDE_VALUE, s.q.headStride),
+            value(ATTENTION_PAGED_UNIFIED_O_SEQ_STRIDE_VALUE, s.o.seqStride),
+            value(ATTENTION_PAGED_UNIFIED_O_TOK_STRIDE_VALUE, s.o.tokenStride),
+            value(ATTENTION_PAGED_UNIFIED_O_HEAD_STRIDE_VALUE, s.o.headStride),
+            value(ATTENTION_PAGED_UNIFIED_KV_BLOCK_STRIDE_VALUE, s.kvBlockStride),
+            value(ATTENTION_PAGED_UNIFIED_KV_TOK_STRIDE_VALUE, s.kvTokStride),
+            value(ATTENTION_PAGED_UNIFIED_KV_HEAD_STRIDE_VALUE, s.kvHeadStride),
+            value(ATTENTION_PAGED_UNIFIED_KV_BLOCK_SPAN_BYTES_VALUE, s.kvBlockSpanBytes),
+            value(ATTENTION_PAGED_UNIFIED_Q_BLOCK_GRID_VALUE, s.qBlockGrid),
+            value(ATTENTION_PAGED_UNIFIED_BLOCK_THREADS_VALUE, launch.blockThreads)};
+}
+
+AttentionPagedUnifiedLaunchInputs
+    readAttentionPagedUnifiedLaunchInputs(const SavedLaunchInputs& inputs)
+{
+    requireLaunchContract(inputs, ATTENTION_PAGED_UNIFIED_DISPATCH_SYMBOL_V1);
+    requireOnlyLaunchValues(inputs,
+                            {ATTENTION_PAGED_UNIFIED_Q_UID_VALUE,
+                             ATTENTION_PAGED_UNIFIED_K_UID_VALUE,
+                             ATTENTION_PAGED_UNIFIED_V_UID_VALUE,
+                             ATTENTION_PAGED_UNIFIED_O_UID_VALUE,
+                             ATTENTION_PAGED_UNIFIED_PAGE_TABLE_K_UID_VALUE,
+                             ATTENTION_PAGED_UNIFIED_PAGE_TABLE_V_UID_VALUE,
+                             ATTENTION_PAGED_UNIFIED_SEQ_LEN_KV_UID_VALUE,
+                             ATTENTION_PAGED_UNIFIED_SEQ_LEN_Q_UID_VALUE,
+                             ATTENTION_PAGED_UNIFIED_RAGGED_OFFSET_UID_VALUE,
+                             ATTENTION_PAGED_UNIFIED_SINK_UID_VALUE,
+                             ATTENTION_PAGED_UNIFIED_SCALE_VALUE,
+                             ATTENTION_PAGED_UNIFIED_NUM_SEQS_VALUE,
+                             ATTENTION_PAGED_UNIFIED_BLOCK_TABLE_STRIDE_VALUE,
+                             ATTENTION_PAGED_UNIFIED_NUM_QUERY_HEADS_VALUE,
+                             ATTENTION_PAGED_UNIFIED_NUM_KV_HEADS_VALUE,
+                             ATTENTION_PAGED_UNIFIED_SLIDING_WINDOW_VALUE,
+                             ATTENTION_PAGED_UNIFIED_Q_UNIFORM_LEN_VALUE,
+                             ATTENTION_PAGED_UNIFIED_Q_SEQ_STRIDE_VALUE,
+                             ATTENTION_PAGED_UNIFIED_Q_TOK_STRIDE_VALUE,
+                             ATTENTION_PAGED_UNIFIED_Q_HEAD_STRIDE_VALUE,
+                             ATTENTION_PAGED_UNIFIED_O_SEQ_STRIDE_VALUE,
+                             ATTENTION_PAGED_UNIFIED_O_TOK_STRIDE_VALUE,
+                             ATTENTION_PAGED_UNIFIED_O_HEAD_STRIDE_VALUE,
+                             ATTENTION_PAGED_UNIFIED_KV_BLOCK_STRIDE_VALUE,
+                             ATTENTION_PAGED_UNIFIED_KV_TOK_STRIDE_VALUE,
+                             ATTENTION_PAGED_UNIFIED_KV_HEAD_STRIDE_VALUE,
+                             ATTENTION_PAGED_UNIFIED_KV_BLOCK_SPAN_BYTES_VALUE,
+                             ATTENTION_PAGED_UNIFIED_Q_BLOCK_GRID_VALUE,
+                             ATTENTION_PAGED_UNIFIED_BLOCK_THREADS_VALUE});
+
+    const auto refuse = [&inputs](std::string_view name, const std::string& rule) {
+        serialization::refuseIngestorPlan(serialization::IngestorPlanRefusal::INCOMPATIBLE,
+                                          "launch value '" + std::string(name) + "' of dispatch '"
+                                              + inputs.dispatchSymbol + "' must be " + rule);
+    };
+    // Every by-value argument is a kernel int32.
+    const auto int32 = [&inputs](std::string_view name, int64_t lowest, int64_t highest) {
+        return static_cast<int32_t>(requireLaunchInt(inputs, name, lowest, highest));
+    };
+    const auto stride = [&int32](std::string_view name) { return int32(name, 0, INT32_LIMIT); };
+
+    AttentionPagedUnifiedLaunchInputs launch;
+    auto& u = launch.uids;
+    u.q = requireLaunchInt(inputs, ATTENTION_PAGED_UNIFIED_Q_UID_VALUE);
+    u.k = requireLaunchInt(inputs, ATTENTION_PAGED_UNIFIED_K_UID_VALUE);
+    u.v = requireLaunchInt(inputs, ATTENTION_PAGED_UNIFIED_V_UID_VALUE);
+    u.o = requireLaunchInt(inputs, ATTENTION_PAGED_UNIFIED_O_UID_VALUE);
+    u.pageTableK = requireLaunchInt(inputs, ATTENTION_PAGED_UNIFIED_PAGE_TABLE_K_UID_VALUE);
+    u.pageTableV = requireLaunchInt(inputs, ATTENTION_PAGED_UNIFIED_PAGE_TABLE_V_UID_VALUE);
+    u.seqLenKv = requireLaunchInt(inputs, ATTENTION_PAGED_UNIFIED_SEQ_LEN_KV_UID_VALUE);
+    u.seqLenQ = requireLaunchInt(inputs, ATTENTION_PAGED_UNIFIED_SEQ_LEN_Q_UID_VALUE);
+    u.raggedOffset = requireLaunchInt(inputs, ATTENTION_PAGED_UNIFIED_RAGGED_OFFSET_UID_VALUE);
+    u.sink = requireLaunchInt(inputs, ATTENTION_PAGED_UNIFIED_SINK_UID_VALUE);
+    const bool ragged = u.raggedOffset != NO_UID;
+
+    auto& s = launch.scalars;
+    // A double that is not a float value was not written from the float the kernel takes.
+    const double scale = requireLaunchDouble(inputs, ATTENTION_PAGED_UNIFIED_SCALE_VALUE);
+    if(!std::isfinite(scale) || scale <= 0.0
+       || scale > static_cast<double>(std::numeric_limits<float>::max())
+       || static_cast<double>(static_cast<float>(scale)) != scale)
+    {
+        refuse(ATTENTION_PAGED_UNIFIED_SCALE_VALUE,
+               "a finite, positive float value, and the plan holds " + std::to_string(scale));
+    }
+    s.scale = static_cast<float>(scale);
+
+    // The ragged sequence search takes its trip count from num_seqs at run time.
+    s.numSeqs = int32(ATTENTION_PAGED_UNIFIED_NUM_SEQS_VALUE, 1, INT32_LIMIT);
+    s.blockTableStride = stride(ATTENTION_PAGED_UNIFIED_BLOCK_TABLE_STRIDE_VALUE);
+    s.numQueryHeads = int32(ATTENTION_PAGED_UNIFIED_NUM_QUERY_HEADS_VALUE, 1, INT32_LIMIT);
+    s.numKvHeads = int32(ATTENTION_PAGED_UNIFIED_NUM_KV_HEADS_VALUE, 1, INT32_LIMIT);
+    if(s.numQueryHeads % s.numKvHeads != 0)
+    {
+        refuse(ATTENTION_PAGED_UNIFIED_NUM_QUERY_HEADS_VALUE,
+               "a multiple of '" + std::string(ATTENTION_PAGED_UNIFIED_NUM_KV_HEADS_VALUE)
+                   + "', and the plan holds " + std::to_string(s.numQueryHeads) + " and "
+                   + std::to_string(s.numKvHeads));
+    }
+    s.slidingWindow = int32(ATTENTION_PAGED_UNIFIED_SLIDING_WINDOW_VALUE, 1, NO_WINDOW);
+    // A dense Q has Sq rows per sequence; a ragged Q reads its rows from the offsets.
+    s.qUniformLen = ragged ? int32(ATTENTION_PAGED_UNIFIED_Q_UNIFORM_LEN_VALUE, 0, 0)
+                           : int32(ATTENTION_PAGED_UNIFIED_Q_UNIFORM_LEN_VALUE, 1, INT32_LIMIT);
+    s.q = {stride(ATTENTION_PAGED_UNIFIED_Q_SEQ_STRIDE_VALUE),
+           stride(ATTENTION_PAGED_UNIFIED_Q_TOK_STRIDE_VALUE),
+           stride(ATTENTION_PAGED_UNIFIED_Q_HEAD_STRIDE_VALUE)};
+    s.o = {stride(ATTENTION_PAGED_UNIFIED_O_SEQ_STRIDE_VALUE),
+           stride(ATTENTION_PAGED_UNIFIED_O_TOK_STRIDE_VALUE),
+           stride(ATTENTION_PAGED_UNIFIED_O_HEAD_STRIDE_VALUE)};
+    s.kvBlockStride = stride(ATTENTION_PAGED_UNIFIED_KV_BLOCK_STRIDE_VALUE);
+    s.kvTokStride = stride(ATTENTION_PAGED_UNIFIED_KV_TOK_STRIDE_VALUE);
+    s.kvHeadStride = stride(ATTENTION_PAGED_UNIFIED_KV_HEAD_STRIDE_VALUE);
+    s.kvBlockSpanBytes
+        = int32(ATTENTION_PAGED_UNIFIED_KV_BLOCK_SPAN_BYTES_VALUE, 1, MAX_BLOCK_SPAN_BYTES);
+    s.qBlockGrid = int32(ATTENTION_PAGED_UNIFIED_Q_BLOCK_GRID_VALUE, 1, MAX_GRID_Y);
+
+    // The CTA is whole waves, at most the 1024 threads a HIP block holds.
+    launch.blockThreads = int32(ATTENTION_PAGED_UNIFIED_BLOCK_THREADS_VALUE, WAVE_LANES, 1024);
+    if(launch.blockThreads % WAVE_LANES != 0)
+    {
+        refuse(ATTENTION_PAGED_UNIFIED_BLOCK_THREADS_VALUE,
+               "a multiple of " + std::to_string(WAVE_LANES) + ", and the plan holds "
+                   + std::to_string(launch.blockThreads));
+    }
+    return launch;
+}
+
 void resetAttentionPagedUnifiedModuleCache()
 {
     moduleCache().clear();
@@ -1211,7 +1379,10 @@ void registerAttentionPagedUnifiedSymbols(SymbolScope<Handle>& scope)
     scope.add(std::string(GFX942_MATCHER_SYMBOL), &gfx942PackMatches);
     scope.add(std::string(GFX950_MATCHER_SYMBOL), &gfx950PackMatches);
     scope.add(std::string(KERNEL_MATCHER_SYMBOL), &kernelMatches);
+    // The UDD's unversioned name dispatches the catalog; saved plans carry the versioned
+    // name of their launch-value contract. One handler serves both.
     scope.add(std::string(DISPATCH_SYMBOL), &s_handler);
+    scope.add(std::string(ATTENTION_PAGED_UNIFIED_DISPATCH_SYMBOL_V1), &s_handler);
 }
 
 } // namespace hip_kernel_provider::kernel_ingestor_engine
