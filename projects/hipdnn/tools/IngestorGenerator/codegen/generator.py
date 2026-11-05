@@ -18,7 +18,7 @@ import json
 import os
 import uuid
 from collections.abc import Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
 from typing import NamedTuple
 
@@ -444,12 +444,38 @@ def build_uhd(config: IngestorConfig, ids: dict) -> dict | None:
     }
 
 
-def build_ued(config: IngestorConfig, ids: dict) -> dict:
+#: UED role maps `uhd_gen promote` installs trained models under (RFC 0019 §3.1).
+TRAINED_ROLES = ("sort_kernel_catalog", "predict_engine", "predict_applicable_kernels")
+
+
+def trained_role_entries(ued: dict) -> dict:
+    """The installed trained models in a prior UED: every role map entry other than the
+    `default` the generator writes itself, keyed by role, in file order. A regenerated UED
+    keeps them, or regenerating a bundle would uninstall every model promoted into it.
+    """
+    entries = {}
+    for role in TRAINED_ROLES:
+        trained = {
+            arch: refs
+            for arch, refs in (ued.get(role) or {}).items()
+            if arch != "default"
+        }
+        if trained:
+            entries[role] = trained
+    return entries
+
+
+def build_ued(config: IngestorConfig, ids: dict, trained: dict | None = None) -> dict:
     """The engine descriptor. ``sdk_version`` is always emitted, including the
     ``"1.0.0"`` baseline, because ``GenericPlanBuilder::understandsGraph()``
-    gates on it at match time."""
+    gates on it at match time.
+
+    ``trained`` (`trained_role_entries` of the prior UED) is carried over where promote
+    put it: per-arch catalog rankers beside ``default``, other roles after everything
+    the generator writes."""
     if config.is_slotted:
         return _build_slotted_ued(config, ids)
+    trained = trained or {}
     ued = {
         "version": "1.0",
         "id": ids["ued"],
@@ -458,13 +484,18 @@ def build_ued(config: IngestorConfig, ids: dict) -> dict:
         "graph_match": {"native": config.graph_match_symbol},
         "metadata": ids["kmd"],
     }
-    if config.engine.has_heuristic:
+    if config.engine.has_heuristic or "sort_kernel_catalog" in trained:
         # RFC 0019 §3.1: the loader rejects a bare top-level `heuristic` pointer.
-        ued["sort_kernel_catalog"] = {"default": ids["uhd"]}
+        catalog = {"default": ids["uhd"]} if config.engine.has_heuristic else {}
+        catalog.update(trained.get("sort_kernel_catalog", {}))
+        ued["sort_kernel_catalog"] = catalog
     if config.engine.knobs:
         ued["knobs"] = list(config.engine.knobs)
     if config.engine.behavior_notes:
         ued["behavior_notes"] = list(config.engine.behavior_notes)
+    for role in TRAINED_ROLES[1:]:
+        if role in trained:
+            ued[role] = copy.deepcopy(trained[role])
     return ued
 
 
@@ -1042,6 +1073,8 @@ class IdResolution:
     report: (
         IdReport  # counted from kdp_documents: a de-duplicated kernel is not emitted
     )
+    # The prior UED's installed models (`trained_role_entries`), written back with it.
+    trained_roles: dict = field(default_factory=dict)
 
 
 def _normal_parts(path: "Path | PurePosixPath") -> tuple[str, ...]:
@@ -1353,10 +1386,15 @@ def resolve_ids(
                     )
 
     ids = mint_ids(config, own, siblings, supplement)
+    trained_roles = (
+        trained_role_entries(engine.ued)
+        if engine is not None and not config.is_slotted
+        else {}
+    )
 
     if satellite:
         built = {
-            "ued": (build_ued(config, ids), engine.ued),
+            "ued": (build_ued(config, ids, trained_roles), engine.ued),
             "kmd": (build_kmd(config, ids), engine.kmd),
             "udd": (build_udd(config, ids), engine.udd),
             "kernel match UMD": (
@@ -1391,6 +1429,7 @@ def resolve_ids(
         satellite=satellite,
         kdp_documents=kdp_documents,
         report=report,
+        trained_roles=trained_roles,
     )
 
 
@@ -1694,7 +1733,10 @@ class IngestorGenerator:
                         write_json(f"{ddir}/{slug}_{slot.name}.uhd.json", uhd)
             else:
                 write_json(f"{ddir}/{slug}.kmd.json", build_kmd(config, ids))
-                write_json(f"{ddir}/{slug}.ued.json", build_ued(config, ids))
+                write_json(
+                    f"{ddir}/{slug}.ued.json",
+                    build_ued(config, ids, resolution.trained_roles),
+                )
                 write_json(f"{ddir}/{slug}.udd.json", build_udd(config, ids))
                 uhd = build_uhd(config, ids)
                 if uhd is not None:

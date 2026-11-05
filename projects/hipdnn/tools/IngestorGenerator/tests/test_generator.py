@@ -1915,6 +1915,26 @@ class TestStableIds:
             "differs from its git blob and its DVC object"
         )
 
+    def test_regenerating_keeps_the_models_promote_installed(
+        self, generator, scale_add_config, tmp_path
+    ):
+        """`uhd_gen promote` adds per-arch rankers beside `default` and engine-level
+        models under `predict_engine`; regenerating the bundle must not uninstall them.
+        """
+        generator.render(scale_add_config, tmp_path)
+        (ued_path,) = (tmp_path / scale_add_config.descriptor_dir).glob("*.ued.json")
+        ued = json.loads(ued_path.read_text(encoding="utf-8"))
+        ued["sort_kernel_catalog"]["gfx950"] = [str(uuid.uuid4()), str(uuid.uuid4())]
+        ued["predict_engine"] = {"gfx950": [str(uuid.uuid4())]}
+        ued_path.write_text(
+            json.dumps(ued, indent=2) + "\n", encoding="utf-8", newline="\n"
+        )
+        installed = ued_path.read_bytes()
+
+        generator.render(scale_add_config, tmp_path)
+
+        assert ued_path.read_bytes() == installed
+
     def test_adding_a_kernel_changes_only_the_added_kernels_id(
         self, generator, scale_add_config, tmp_path
     ):
