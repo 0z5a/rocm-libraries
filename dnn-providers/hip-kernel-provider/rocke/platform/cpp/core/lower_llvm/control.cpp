@@ -1573,75 +1573,19 @@ static int64_t ll_num_iter_args(const rocke_op_t* op)
     return num_iter;
 }
 
-/* Fetch the i-th iter_args metadata map's "name"/"type" string fields. The
- * Python iter_meta is op.attrs["iter_args"], a list of {"name","type"} dicts;
- * here it is a ROCKE_ATTR_LIST whose items are small attr maps. Returns false if
- * the list is absent or i is out of range. */
-static bool ll_iter_meta(const rocke_op_t* op, int i, const char** out_name, const char** out_type)
+/* The "name" of the i-th iter_args metadata map: op.attrs["iter_args"][i]
+ * ["name"] in Python. rocke_i_scf_for_error (run by _op_scf_for before either
+ * lowering path) has checked that the list holds one map per carried value,
+ * each with a non-empty name. */
+static const char* ll_iter_name(const rocke_op_t* op, int i)
 {
-    const rocke_attr_value_t* v = rocke_attr_get(&op->attrs, "iter_args");
-    if(!v || v->kind != ROCKE_ATTR_LIST || i < 0 || i >= v->u.list.count)
-    {
-        return false;
-    }
-    const rocke_attr_map_t* m = v->u.list.items[i];
-    if(!m)
-    {
-        return false;
-    }
-    if(out_name)
-    {
-        *out_name = rocke_attr_get_str(m, "name");
-    }
-    if(out_type)
-    {
-        *out_type = rocke_attr_get_str(m, "type");
-    }
-    return true;
+    return rocke_attr_get_str(rocke_attr_get(&op->attrs, "iter_args")->u.list.items[i], "name");
 }
 
-/* Validate the serialized metadata against the typed operands/results, then
- * delegate rendering to the canonical recursive type renderer. */
-static const char*
-    ll_iter_llvm_type(rocke_lower_t* L, const rocke_op_t* op, int i, const char** out_name)
+/* Render the LLVM type of the value iter_arg `i` carries. */
+static const char* ll_iter_llvm_type(rocke_lower_t* L, const rocke_op_t* op, int i)
 {
-    const char *name = NULL, *type_name = NULL;
-    if(!ll_iter_meta(op, i, &name, &type_name) || !name || !*name || !type_name)
-    {
-        rocke_ll_fail(L, ROCKE_ERR_VALUE, "scf.for iter_arg %d has incomplete metadata", i);
-    }
-    if(3 + i >= op->num_operands)
-    {
-        rocke_ll_fail(L, ROCKE_ERR_VALUE, "scf.for iter_arg %d has no init operand", i);
-    }
-    if(i >= op->num_results)
-    {
-        rocke_ll_fail(L, ROCKE_ERR_VALUE, "scf.for iter_arg %s has no result", name);
-    }
-
     const rocke_type_t* type = op->operands[3 + i]->type;
-    if(!type || !type->name)
-    {
-        rocke_ll_fail(L, ROCKE_ERR_VALUE, "scf.for iter_arg %s has no init type", name);
-    }
-    if(strcmp(type_name, type->name) != 0)
-    {
-        rocke_ll_fail(L,
-                      ROCKE_ERR_VALUE,
-                      "scf.for iter_arg %s metadata type '%s' does not match init type '%s'",
-                      name,
-                      type_name,
-                      type->name);
-    }
-    if(!rocke_type_eq(op->results[i]->type, type))
-    {
-        rocke_ll_fail(L,
-                      ROCKE_ERR_VALUE,
-                      "scf.for result type '%s' does not match iter_arg %s type '%s'",
-                      op->results[i]->type ? op->results[i]->type->name : "(null)",
-                      name,
-                      type->name);
-    }
     if(type->kind == ROCKE_TYPE_VECTOR)
     {
         if(type->count <= 0)
@@ -1667,10 +1611,6 @@ static const char*
                       "scf.for loop-carried type '%s' is unsupported; expected a scalar or "
                       "vector of scalar values",
                       type->name);
-    }
-    if(out_name)
-    {
-        *out_name = name;
     }
     return rocke_ll_llvm_type(L, type);
 }
@@ -1748,9 +1688,9 @@ void rocke_ll_lower_normal_for(rocke_lower_t* L, const rocke_op_t* op)
                          header->label);
     for(int i = 0; i < (int)num_iter; i++)
     {
-        const char* mname = NULL;
+        const char* mname = ll_iter_name(op, i);
         const rocke_value_t* init = op->operands[3 + i];
-        const char* ll_ty = ll_iter_llvm_type(L, op, i, &mname);
+        const char* ll_ty = ll_iter_llvm_type(L, op, i);
         rocke_ll_block_emitf(L,
                              header,
                              "  %s = phi %s [ %s, %%%s ], "
@@ -1798,8 +1738,8 @@ void rocke_ll_lower_normal_for(rocke_lower_t* L, const rocke_op_t* op)
                          rocke_ll_operand(L, step));
     for(int i = 0; i < (int)num_iter; i++)
     {
-        const char* mname = NULL;
-        const char* ll_ty = ll_iter_llvm_type(L, op, i, &mname);
+        const char* mname = ll_iter_name(op, i);
+        const char* ll_ty = ll_iter_llvm_type(L, op, i);
         rocke_ll_block_emitf(L,
                              latch,
                              "  %s.next.%s = bitcast %s %s to %s",
@@ -1821,8 +1761,8 @@ void rocke_ll_lower_normal_for(rocke_lower_t* L, const rocke_op_t* op)
         ll_block_replace(L, header, "%FOR_EXIT", exit_repl);
         for(int i = 0; i < (int)num_iter && i < op->num_results; i++)
         {
-            const char* mname = NULL;
-            const char* ll_ty = ll_iter_llvm_type(L, op, i, &mname);
+            const char* mname = ll_iter_name(op, i);
+            const char* ll_ty = ll_iter_llvm_type(L, op, i);
             const rocke_value_t* result = op->results[i];
             rocke_ll_block_emitf(
                 L, exit_blk, "  %s = bitcast %s %s to %s", result->name, ll_ty, mname, ll_ty);
@@ -1934,11 +1874,7 @@ void rocke_ll_lower_unrolled_for(rocke_lower_t* L, const rocke_op_t* op)
             }
             for(int mi = 0; mi < (int)num_iter; mi++)
             {
-                const char* mname = NULL;
-                if(!ll_iter_meta(op, mi, &mname, NULL) || !mname)
-                {
-                    continue;
-                }
+                const char* mname = ll_iter_name(op, mi);
                 if(operand->op == op && strcmp(operand->name, mname) == 0)
                 {
                     bool present = false;
@@ -2009,11 +1945,7 @@ void rocke_ll_lower_unrolled_for(rocke_lower_t* L, const rocke_op_t* op)
             n_renames++;
             for(int mi = 0; mi < (int)num_iter; mi++)
             {
-                const char* mname = NULL;
-                if(!ll_iter_meta(op, mi, &mname, NULL) || !mname)
-                {
-                    continue;
-                }
+                const char* mname = ll_iter_name(op, mi);
                 if(strcmp(vo->name, mname) == 0)
                 {
                     vo->name = current_iter_values[mi];
@@ -2065,8 +1997,7 @@ void rocke_ll_lower_unrolled_for(rocke_lower_t* L, const rocke_op_t* op)
 
     for(int i = 0; i < (int)num_iter && i < op->num_results; i++)
     {
-        const char* mname = NULL;
-        const char* ll_ty = ll_iter_llvm_type(L, op, i, &mname);
+        const char* ll_ty = ll_iter_llvm_type(L, op, i);
         const rocke_value_t* result = op->results[i];
         rocke_ll_emitf(
             L, "  %s = bitcast %s %s to %s", result->name, ll_ty, current_iter_values[i], ll_ty);

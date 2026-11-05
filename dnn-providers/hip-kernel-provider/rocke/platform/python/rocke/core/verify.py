@@ -525,16 +525,8 @@ class _Verifier:
                 break
 
         iter_meta = op.attrs.get("iter_args", []) or []
-        # result types must match init types
-        for res, init in zip(op.results, iter_inits):
-            if res.type != init.type:
-                self.err(
-                    f"scf.for: result type {res.type.name} != iter init "
-                    f"type {init.type.name}",
-                    op,
-                )
-        # The counts of carried values and the body's yields: one rule for the
-        # verifier and every lowering.
+        # The carried values (their counts, metadata and result types) and the
+        # body's yields: one rule for the verifier and every lowering.
         loop_error = _scf_for_error(op)
         if loop_error is not None:
             self.err(loop_error, op)

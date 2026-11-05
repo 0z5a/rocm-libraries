@@ -1063,6 +1063,39 @@ def _scf_for_carried_count_error(op: Op) -> str | None:
     return None
 
 
+def _scf_for_metadata_entry_error(op: Op) -> str | None:
+    """The refusal for the ``scf.for`` ``op`` when an ``iter_args`` metadata
+    entry does not describe its carried value, or None when every entry does.
+
+    The counts of carried values agree (:func:`_scf_for_carried_count_error`).
+    Entry ``i`` is a map whose ``name`` is a non-empty string and whose
+    ``type`` names the type of init operand ``i``; result ``i`` has that type
+    too.
+    """
+    for index, (entry, init, result) in enumerate(
+        zip(op.attrs.get("iter_args", []), op.operands[3:], op.results)
+    ):
+        if not isinstance(entry, dict):
+            return f"scf.for iter_arg {index} metadata must be a map"
+        name = entry.get("name")
+        if not isinstance(name, str) or not name:
+            return f"scf.for iter_arg {index} metadata has no name"
+        type_name = entry.get("type")
+        if not isinstance(type_name, str):
+            return f"scf.for iter_arg {name} metadata has no type"
+        if type_name != init.type.name:
+            return (
+                f"scf.for iter_arg {name} metadata type '{type_name}' "
+                f"does not match init type '{init.type.name}'"
+            )
+        if result.type != init.type:
+            return (
+                f"scf.for result type '{result.type.name}' does not match "
+                f"iter_arg {name} type '{init.type.name}'"
+            )
+    return None
+
+
 def _scf_for_yield_error(op: Op) -> str | None:
     """The refusal for the ``scf.yield`` ops directly in the body of the
     ``scf.for`` ``op``, whose carried-value counts agree
@@ -1105,7 +1138,8 @@ def _scf_for_error(op: Op) -> str | None:
     """The refusal for the ``scf.for`` ``op``, or None when the loop is sound.
 
     A loop's counts of carried values agree
-    (:func:`_scf_for_carried_count_error`); it cannot carry a buffer
+    (:func:`_scf_for_carried_count_error`) and its ``iter_args`` metadata
+    describes them (:func:`_scf_for_metadata_entry_error`); it cannot carry a buffer
     descriptor (:func:`_scf_for_carried_descriptor_error`); its body yields
     once, at its end, the values it carries (:func:`_scf_for_yield_error`); and
     it takes only the yields directly in its body, so its body nests none in a
@@ -1116,6 +1150,9 @@ def _scf_for_error(op: Op) -> str | None:
     engines (``rocke_i_scf_for_error``).
     """
     error = _scf_for_carried_count_error(op)
+    if error is not None:
+        return error
+    error = _scf_for_metadata_entry_error(op)
     if error is not None:
         return error
     error = _scf_for_carried_descriptor_error(op)
